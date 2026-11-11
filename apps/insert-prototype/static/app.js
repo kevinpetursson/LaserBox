@@ -1,5 +1,5 @@
 const fields = [
-  "length", "width", "height", "thickness", "kerf", "finger_count",
+  "length", "width", "height", "thickness", "kerf", "finger_length",
 ];
 
 let dimMode = "inside";
@@ -22,7 +22,7 @@ function readParams() {
   const params = {};
   for (const f of fields) {
     const v = el(f).value;
-    params[f] = f === "finger_count" ? parseInt(v, 10) : parseFloat(v);
+    params[f] = parseFloat(v);
   }
   params.floor = el("floor").checked;
   const wallT = params.thickness;
@@ -350,17 +350,17 @@ function syncFloorJoint(row) {
 function syncTopJoint(row) {
   const input = row.querySelector(".h-top-fingers");
   if (!input) return;
+  const label = input.closest("label");
   const gap = parseFloat(row.querySelector(".h-top").value);
   const short = Number.isFinite(gap) && gap > 0;
   const open = lidMode !== "closed";
+  if (label) label.hidden = open;
   input.disabled = short || open;
-  const note = open
-    ? "Only a closed box has a top panel to joint into."
-    : short
-      ? "This divider stops below the top, so it is not jointed into the lid."
-      : "Uncheck to stop this divider under the lid with a straight edge and no slots in the lid.";
+  const note = short
+    ? "This divider stops below the top, so it is not jointed into the lid."
+    : "Uncheck to stop this divider under the lid with a straight edge and no slots in the lid.";
   input.title = note;
-  input.closest("label").title = note;
+  if (label) label.title = note;
 }
 
 function syncHeightUnit(row) {
@@ -489,6 +489,7 @@ function addDividerRow(d) {
   nameInput.addEventListener("input", () => {
     row.dataset.label = nameInput.value;
     refreshDividerLabels();
+    if (row === selectedDivider) paintPlan();
   });
   syncHeightUnit(row);
   enforceDividerGaps(row);
@@ -1081,6 +1082,46 @@ function paintPlan() {
   for (const i of order) paintLeanFill(view, dividerEnds(rows[i]), rows[i]);
   for (const i of order) paintDividerStrip(view, dividerEnds(rows[i]), i === picked);
   for (const i of order) paintTopDash(view, dividerEnds(rows[i]), rows[i]);
+  placePlanName(view);
+}
+
+function placePlanName(view) {
+  const tag = el("plan-name");
+  const canvas = el("plan");
+  if (!tag || !canvas) return;
+  const index = selectedDividerIndex();
+  const row = selectedDivider;
+  if (!row || index < 0) {
+    tag.hidden = true;
+    tag.textContent = "";
+    return;
+  }
+  tag.textContent = dividerDisplayName(row, index);
+  tag.hidden = false;
+  const ends = dividerEnds(row);
+  const axis = dividerAxis(ends);
+  const mx = (ends.x1 + ends.x2) / 2;
+  const my = (ends.y1 + ends.y2) / 2;
+  const tw = tag.offsetWidth;
+  const th = tag.offsetHeight;
+  let best = null;
+  for (const sign of [1, -1]) {
+    const left = view.sx(mx) - axis.nx * sign * (tw / 2 + 12);
+    const top = view.sy(my) - axis.ny * sign * (th / 2 + 12);
+    const x = left - tw / 2;
+    const y = top - th / 2;
+    const overflow =
+      Math.max(0, 6 - x) + Math.max(0, x + tw - (view.w - 6)) +
+      Math.max(0, 6 - y) + Math.max(0, y + th - (view.h - 6));
+    if (!best || overflow < best.overflow) best = { left, top, overflow };
+  }
+  const left = Math.min(view.w - 6 - tw / 2, Math.max(6 + tw / 2, best.left));
+  const top = Math.min(view.h - 6 - th / 2, Math.max(6 + th / 2, best.top));
+  const frame = tag.offsetParent || canvas.parentElement;
+  const canvasRect = canvas.getBoundingClientRect();
+  const frameRect = frame.getBoundingClientRect();
+  tag.style.left = `${canvasRect.left - frameRect.left + canvas.clientLeft + left}px`;
+  tag.style.top = `${canvasRect.top - frameRect.top + canvas.clientTop + top}px`;
 }
 
 function planHit(view, x, y) {
@@ -1554,7 +1595,7 @@ function designConfig() {
     height: asNumber(el("height").value, 0),
     thickness: asNumber(el("thickness").value, 3),
     kerf: asNumber(el("kerf").value, 0),
-    finger_count: parseInt(el("finger_count").value, 10) || 5,
+    finger_length: asNumber(el("finger_length").value, 10),
     floor: el("floor").checked,
     lid: lidMode,
     lid_height: asNumber(el("lid-height").value, 15),
@@ -1633,7 +1674,12 @@ function designProblems(data) {
   }
   const kerf = asNumber(data.kerf, NaN);
   if (!Number.isFinite(kerf) || kerf < 0) problems.push("Kerf must be zero or a positive number.");
-  if (!Number.isInteger(data.finger_count) || data.finger_count < 3 || data.finger_count > 15) {
+  const fingerLength = asNumber(data.finger_length, NaN);
+  if (data.version >= 2 || data.finger_length != null) {
+    if (!Number.isFinite(fingerLength) || fingerLength < 4 || fingerLength > 40) {
+      problems.push("Finger length must be from 4 to 40 mm.");
+    }
+  } else if (!Number.isInteger(data.finger_count) || data.finger_count < 3 || data.finger_count > 15) {
     problems.push("Finger count must be a whole number from 3 to 15.");
   }
   if (!["none", "cap", "top", "slide", "latch", "closed"].includes(data.lid)) {
@@ -1850,7 +1896,14 @@ function applyDesign(data) {
   el("height").value = data.height;
   el("thickness").value = data.thickness;
   el("kerf").value = asNumber(data.kerf, 0);
-  el("finger_count").value = parseInt(data.finger_count, 10) || 5;
+  if (data.finger_length != null) {
+    el("finger_length").value = asNumber(data.finger_length, 10);
+  } else if (Number.isInteger(data.finger_count) && data.finger_count > 0) {
+    const outside = data.measure === "inside" && data.floor ? asNumber(data.height, 0) + asNumber(data.thickness, 0) : asNumber(data.height, 0);
+    el("finger_length").value = roundMm(outside / data.finger_count);
+  } else {
+    el("finger_length").value = 10;
+  }
   el("floor").checked = !!data.floor;
   el("snap-mm").checked = data.snap !== false;
 

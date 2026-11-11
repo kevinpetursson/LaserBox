@@ -113,7 +113,12 @@ class InsertParams(BaseModel):
     thickness: float = Field(3.0, ge=3.0, le=6.0, description="Material thickness (mm)")
     kerf: float = Field(0.15, ge=0, description="Laser kerf compensation (mm)")
     floor: bool = Field(True, description="Include floor (print); default on")
-    finger_count: int = Field(5, ge=3, le=15, description="Finger joints per wall edge")
+    finger_length: float = Field(
+        10.0,
+        ge=4.0,
+        le=40.0,
+        description="Approximate length of one finger (mm). Each edge uses the nearest odd count.",
+    )
     lid: Literal["none", "cap", "top", "slide", "latch", "closed"] = Field(
         "none",
         description="none, a cap, a lid that sits on the walls, a tab-and-slot sheet, a spring latch, or a finger-jointed closed top",
@@ -193,6 +198,30 @@ class InsertParams(BaseModel):
             "left": ("wall-left", "wall-right", "wall-front", "wall-back"),
             "right": ("wall-right", "wall-left", "wall-front", "wall-back"),
         }[self.lid_slide]
+
+    @property
+    def finger_count(self) -> int:
+        """Odd finger count along the outside height, nearest to ``finger_length``.
+
+        Both ends of an edge stay the same kind of joint. Other edges reuse this
+        spacing and may land a little long or short so their own ends still match.
+        """
+        height = self.height
+        target = self.finger_length
+        if height <= 1e-6 or target <= 1e-6:
+            return 5
+        raw = height / target
+        limit = max(3, int(raw) + 3)
+        best = 3
+        best_err = abs(height / 3.0 - target)
+        count = 5
+        while count <= limit:
+            err = abs(height / count - target)
+            if err < best_err:
+                best = count
+                best_err = err
+            count += 2
+        return best
 
     def closed_top(self) -> bool:
         """A finger-jointed panel fills the top of the walls and does not raise the box."""
@@ -485,7 +514,7 @@ def demo_params() -> InsertParams:
         thickness=3.0,
         kerf=0.15,
         floor=True,
-        finger_count=5,
+        finger_length=10.0,
         lid="none",
         dividers=[
             Divider(x1=93.0, y1=3.0, x2=93.0, y2=197.0, label="vertical"),

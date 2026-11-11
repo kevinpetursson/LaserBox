@@ -328,17 +328,20 @@ select:focus {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
-.floor-fingers {
+.floor-fingers,
+.top-fingers {
   grid-column: 1 / -1;
   margin-top: 0.1rem;
 }
 
-.floor-fingers input {
+.floor-fingers input,
+.top-fingers input {
   width: auto;
   flex: 0 0 auto;
 }
 
-.floor-fingers:has(input:disabled) {
+.floor-fingers:has(input:disabled),
+.top-fingers:has(input:disabled) {
   color: var(--muted);
 }
 
@@ -490,6 +493,31 @@ button.danger {
 
 .plan-snap {
   margin: 0.45rem 0 0.15rem;
+}
+
+.plan-frame {
+  position: relative;
+}
+
+.plan-name {
+  position: absolute;
+  z-index: 2;
+  margin: 0;
+  max-width: calc(100% - 12px);
+  padding: 0.18rem 0.55rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: rgba(28, 24, 14, 0.94);
+  border: 1px solid #e6b040;
+  color: #fff6df;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.25;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
 }
 
 #plan.is-slide { cursor: grab; }

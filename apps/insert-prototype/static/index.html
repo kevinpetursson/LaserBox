@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Box Inserts — prototype</title>
-  <link rel="stylesheet" href="/static/style.css?v=side-height" />
+  <link rel="stylesheet" href="/static/style.css?v=plan-name" />
 </head>
 <body>
   <header>
@@ -74,13 +74,13 @@
           <input id="kerf" type="number" step="0.01" min="0" />
         </label>
         <label>
-          <span class="field-name">Finger count
+          <span class="field-name">Finger length (mm)
             <span class="info">
-              <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-fingers" aria-label="About finger count">i</button>
-              <span id="tip-fingers" class="tip" role="tooltip" hidden>How many finger joints run along each vertical corner of the laser-cut walls. The floor edges, the lid panel, and the divider joints use that same spacing. An even count is raised to the next odd number so both ends of the joint match. A lid side that is too short for that many fingers meets the next side at the middle of the edge instead. This affects SVG and DXF only, not the STL.</span>
+              <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-fingers" aria-label="About finger length">i</button>
+              <span id="tip-fingers" class="tip" role="tooltip" hidden>Approximate length of each finger. The outside height is divided into the odd number of fingers that lands closest to this length, so both ends of that edge match. The floor, the lid, and the dividers use the same spacing. A longer or shorter edge can come out a little different so its own fingers still meet neatly. A lid side that is too short for three fingers meets the next side at the middle of the edge instead. This affects SVG and DXF only, not the STL.</span>
             </span>
           </span>
-          <input id="finger_count" type="number" step="1" min="3" max="15" />
+          <input id="finger_length" type="number" step="0.5" min="4" max="40" />
         </label>
       </div>
       <div class="checks">
@@ -231,10 +231,13 @@
         <h2 class="with-info">Plan
           <span class="info">
             <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-plan" aria-label="About the plan">i</button>
-            <span id="tip-plan" class="tip" role="tooltip" hidden>This view shows only the bottom face of each divider. Click a divider to select it. Drag that face sideways. A divider that ends on it stretches so the joint stays put. Drag an end to change its length. The angle stays as it is. Snap to whole mm keeps that drag on a whole millimetre, unless it is close to a wall or another divider. A tilted divider shows a dashed line where its top leans. A divider that ends on it shows a dashed top, longer or shorter, so the joint meets that line. Dragging still moves the bottom face. Looking down on the top, with the front edge at the bottom. Drag the bar under the plan to make this view shorter or taller.</span>
+            <span id="tip-plan" class="tip" role="tooltip" hidden>This view shows only the bottom face of each divider. Click a divider to select it. Its name appears beside the selected bar. Drag that face sideways. A divider that ends on it stretches so the joint stays put. Drag an end to change its length. The angle stays as it is. Snap to whole mm keeps that drag on a whole millimetre, unless it is close to a wall or another divider. A tilted divider shows a dashed line where its top leans. A divider that ends on it shows a dashed top, longer or shorter, so the joint meets that line. Dragging still moves the bottom face. Looking down on the top, with the front edge at the bottom. Drag the bar under the plan to make this view shorter or taller.</span>
           </span>
         </h2>
-        <canvas id="plan" width="800" height="500"></canvas>
+        <div class="plan-frame">
+          <canvas id="plan" width="800" height="500"></canvas>
+          <p id="plan-name" class="plan-name" role="status" hidden></p>
+        </div>
         <div id="plan-resize" class="preview-resize" role="separator" aria-orientation="horizontal" aria-label="Resize plan height" tabindex="0"></div>
         <label class="check plan-snap" title="A dragged face or end lands on a whole millimetre. A wall or another divider still wins when the pointer is close.">
           <input id="snap-mm" type="checkbox" checked />
@@ -272,6 +275,6 @@
     <p><a href="https://github.com/kevinpetursson/LaserBox">Source code</a> · <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a></p>
   </footer>
 
-  <script src="/static/app.js?v=lid-select"></script>
+  <script src="/static/app.js?v=plan-name3"></script>
 </body>
 </html>
