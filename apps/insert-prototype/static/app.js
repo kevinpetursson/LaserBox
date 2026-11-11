@@ -1468,9 +1468,11 @@ function asNumber(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+const DESIGN_VERSION = 2;
+
 function designConfig() {
   return {
-    version: 1,
+    version: DESIGN_VERSION,
     measure: dimMode === "outside" ? "outside" : "inside",
     snap: el("snap-mm").checked,
     length: asNumber(el("length").value, 0),
@@ -1515,7 +1517,13 @@ function designConfig() {
 
 function designProblems(data) {
   const problems = [];
-  if (!data || typeof data !== "object" || Array.isArray(data) || data.version !== 1) {
+  if (!data || typeof data !== "object" || Array.isArray(data) || !Number.isInteger(data.version)) {
+    return ["This file is not a saved box design."];
+  }
+  if (data.version > DESIGN_VERSION) {
+    return ["This file was saved by a newer version of this page."];
+  }
+  if (data.version < 1) {
     return ["This file is not a saved box design."];
   }
   const measure = data.measure;
@@ -1555,19 +1563,28 @@ function designProblems(data) {
   if (!["none", "cap", "top", "slide", "latch"].includes(data.lid)) {
     problems.push("Lid must be none, a cap, sit on top, tab and slot, or latch.");
   }
-  if (data.lid_latch_count != null && data.lid_latch_count !== 1 && data.lid_latch_count !== 2) {
-    problems.push("Front tabs must be 1 or 2.");
+  const latchRequired = data.version >= 2;
+  if (latchRequired || data.lid_latch_count != null) {
+    if (data.lid_latch_count !== 1 && data.lid_latch_count !== 2) {
+      problems.push("Front tabs must be 1 or 2.");
+    }
   }
-  if (data.lid_latch_loops != null && (!Number.isInteger(data.lid_latch_loops) || data.lid_latch_loops < 2 || data.lid_latch_loops > 8)) {
-    problems.push("Loops must be a whole number from 2 to 8.");
+  if (latchRequired || data.lid_latch_loops != null) {
+    if (!Number.isInteger(data.lid_latch_loops) || data.lid_latch_loops < 2 || data.lid_latch_loops > 8) {
+      problems.push("Loops must be a whole number from 2 to 8.");
+    }
   }
-  const latchBeam = data.lid_latch_beam == null ? null : asNumber(data.lid_latch_beam, NaN);
-  if (latchBeam != null && (!Number.isFinite(latchBeam) || latchBeam < 1 || latchBeam > 4)) {
-    problems.push("Beam must be from 1 to 4 mm.");
+  if (latchRequired || data.lid_latch_beam != null) {
+    const latchBeam = asNumber(data.lid_latch_beam, NaN);
+    if (!Number.isFinite(latchBeam) || latchBeam < 1 || latchBeam > 4) {
+      problems.push("Beam must be from 1 to 4 mm.");
+    }
   }
-  const latchWidth = data.lid_latch_width == null ? null : asNumber(data.lid_latch_width, NaN);
-  if (latchWidth != null && (!Number.isFinite(latchWidth) || latchWidth < 14 || latchWidth > 80)) {
-    problems.push("Spring width must be from 14 to 80 mm.");
+  if (latchRequired || data.lid_latch_width != null) {
+    const latchWidth = asNumber(data.lid_latch_width, NaN);
+    if (!Number.isFinite(latchWidth) || latchWidth < 14 || latchWidth > 80) {
+      problems.push("Spring width must be from 14 to 80 mm.");
+    }
   }
   const side = asNumber(data.lid_height, NaN);
   if (!Number.isFinite(side)) {
