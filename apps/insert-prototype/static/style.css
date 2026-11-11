@@ -114,6 +114,10 @@ h2.with-info {
   gap: 0.65rem;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .grid > label {
   min-width: 0;
 }
@@ -187,7 +191,8 @@ button.info-btn[aria-expanded="true"] {
 }
 
 input[type="number"],
-input[type="text"] {
+input[type="text"],
+select {
   width: 100%;
   min-width: 0;
   background: #151a17;
@@ -198,7 +203,12 @@ input[type="text"] {
   font-size: 0.95rem;
 }
 
-input:focus {
+.lid-pick {
+  margin-bottom: 0.85rem;
+}
+
+input:focus,
+select:focus {
   outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
@@ -308,6 +318,10 @@ input:focus {
   padding: 0.4rem 0.55rem;
 }
 
+.divider-height .gap-warn {
+  grid-column: 1 / -1;
+}
+
 .divider-tilt {
   grid-column: 1 / -1;
   display: grid;
@@ -336,6 +350,18 @@ input:focus {
 }
 
 .gap-warn[hidden] {
+  display: none;
+}
+
+.height-overall {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.height-overall[hidden] {
   display: none;
 }
 
@@ -441,6 +467,26 @@ button.danger {
 
 #view3d { cursor: grab; }
 #view3d:active { cursor: grabbing; }
+
+#drawing { cursor: grab; }
+#drawing.is-panning { cursor: grabbing; }
+
+.preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.preview-head h2 {
+  margin: 0;
+}
+
+.preview-head button.secondary {
+  margin-top: 0;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.82rem;
+}
 
 .plan-snap {
   margin: 0.45rem 0 0.15rem;

@@ -122,6 +122,15 @@ def _lid_corner_count(edge_h: float, wall_pitch: float) -> int:
     return count
 
 
+def _top_polyline(
+    length: float, depth: float, spans: List[Tuple[float, float]], height: float
+) -> Poly:
+    """Top edge, right to left. Fingers stay at the wall top; gaps drop by `depth`."""
+    edge = [(x, height - y) for x, y in _bottom_polyline(length, depth, spans)]
+    edge.reverse()
+    return edge
+
+
 def _wall_panel_outline(
     length: float,
     height: float,
@@ -133,6 +142,7 @@ def _wall_panel_outline(
     corner_count: int | None = None,
     left_joint: float | None = None,
     right_joint: float | None = None,
+    top_fingers: List[Tuple[float, float]] | None = None,
 ) -> Poly:
     """Wall panel in local coords: length along X, height along Y.
 
@@ -143,6 +153,8 @@ def _wall_panel_outline(
     short edges. A count of 1 is a single joint at the middle of that edge.
     `left_joint` and `right_joint` stop the fingers early when the neighbouring
     wall is shorter. The rest of that end rises straight to `height`.
+    `top_fingers` uses the same spans as the floor, so a closed lid matches the
+    bottom. Corner fingers stop at the underside of that lid.
     """
 
     def corner_raw(span: float, male: bool) -> List[Tuple[float, float]]:
@@ -151,18 +163,23 @@ def _wall_panel_outline(
         n = fingers if corner_count is None else corner_count
         return _finger_edge(span, thickness, n, male, 0.0)
 
+    cap = height - thickness if top_fingers else None
+
     def rising(joint: float | None, male: bool, at_right: bool, y0: float) -> Poly:
         limit = height if joint is None else min(height, max(y0, joint))
+        if cap is not None:
+            limit = min(limit, cap)
         edge_h = limit - y0
         root = length if at_right else 0.0
         if edge_h < 1.0:
-            return [(root, y0), (root, height)] if at_right else [(root, height), (root, y0)]
+            end = height if cap is None else limit
+            return [(root, y0), (root, end)] if at_right else [(root, end), (root, y0)]
         raw = corner_raw(edge_h, male)
         if at_right:
             pts = [(length - y, x + y0) for x, y in raw]
             if floor_fingers and (abs(pts[0][0] - length) > 1e-9 or abs(pts[0][1] - y0) > 1e-9):
                 pts.insert(0, (length, y0))
-            if height > limit + 1e-6:
+            if cap is None and height > limit + 1e-6:
                 if abs(pts[-1][0] - root) > 1e-6:
                     pts.append((root, pts[-1][1]))
                 pts.append((root, height))
@@ -170,7 +187,7 @@ def _wall_panel_outline(
         pts_up = [(y, x + y0) for x, y in raw]
         if floor_fingers and (abs(pts_up[0][0]) > 1e-9 or abs(pts_up[0][1] - y0) > 1e-9):
             pts_up.insert(0, (0.0, y0))
-        if height > limit + 1e-6:
+        if cap is None and height > limit + 1e-6:
             if abs(pts_up[-1][0] - root) > 1e-6:
                 pts_up.append((root, pts_up[-1][1]))
             pts_up.append((root, height))
@@ -182,7 +199,10 @@ def _wall_panel_outline(
     else:
         bottom = [(0.0, 0.0), (length, 0.0)]
     right = rising(right_joint, right_male, True, y0)
-    top = [(length, height), (0.0, height)]
+    if top_fingers:
+        top = _top_polyline(length, thickness, top_fingers, height)
+    else:
+        top = [(length, height), (0.0, height)]
     left = rising(left_joint, left_male, False, y0)
     outline: Poly = []
     _append_unique(outline, bottom)
@@ -460,8 +480,8 @@ def _plate_overlap(
     a: Divider, b: Divider, params: InsertParams
 ) -> Tuple[float, float] | None:
     """World-Y overlap of two divider plates. None when they do not meet in height."""
-    sa = a.plate_span(params.height, params.thickness, params.floor)
-    sb = b.plate_span(params.height, params.thickness, params.floor)
+    sa = a.plate_span(params.height, params.thickness, params.floor, params.closed_top())
+    sb = b.plate_span(params.height, params.thickness, params.floor, params.closed_top())
     if sa is None or sb is None:
         return None
     lo = max(sa[0], sb[0])
@@ -473,7 +493,7 @@ def _plate_overlap(
 
 def _finger_interval(d: Divider, params: InsertParams) -> Tuple[float, float] | None:
     """World-Y of the standing edge, above the floor joint."""
-    span = d.plate_span(params.height, params.thickness, params.floor)
+    span = d.plate_span(params.height, params.thickness, params.floor, params.closed_top())
     if span is None:
         return None
     floor_top = params.thickness if params.floor else 0.0
@@ -548,7 +568,7 @@ def _share_opposite_stub(
 
 def _plate_anchor(d: Divider, params: InsertParams) -> float:
     """World height the lean pivots about: the bottom of this divider's plate."""
-    span = d.plate_span(params.height, params.thickness, params.floor)
+    span = d.plate_span(params.height, params.thickness, params.floor, params.closed_top())
     return span[0] if span is not None else 0.0
 
 
@@ -1001,7 +1021,11 @@ def _subtract_spans(
 
 
 def _divider_finger_slots_on_floor(
-    d: Divider, params: InsertParams, joints: List[_DivJoint] | None = None
+    d: Divider,
+    params: InsertParams,
+    joints: List[_DivJoint] | None = None,
+    notch_kind: str = "cross-bottom",
+    y_open: float = 0.0,
 ) -> List[Poly]:
     """Finger slots through the floor. Gaps between fingers stay solid so the divider sits on them.
 
@@ -1016,7 +1040,7 @@ def _divider_finger_slots_on_floor(
     pitch = params.height / _odd_count(params.finger_count)
     spans = [(a + t0, b + t0) for a, b in _spans_for_length(t1 - t0, pitch)]
     spans = _subtract_spans(
-        spans, _notch_intervals(owned, "cross-bottom", params.kerf, y_open=0.0)
+        spans, _notch_intervals(owned, notch_kind, params.kerf, y_open=y_open)
     )
     holes: List[Poly] = []
     for a, b in spans:
@@ -1241,10 +1265,12 @@ def _divider_outline(
     right_edge: Poly | None = None,
     left_reach: float | None = None,
     right_reach: float | None = None,
+    closed: bool = False,
 ) -> Poly:
     """Divider plate. Y stays in wall coordinates, so a raised plate starts above 0.
 
-    Bottom fingers pass through the floor only when the plate starts at y=0. End fingers
+    Bottom fingers pass through the floor only when the plate starts at y=0. Top fingers
+    pass through a closed lid only when the plate reaches the wall top. End fingers
     run along `left_span` and `right_span`. Cross-lap notches open to the reach Y carried
     on each notch. `left_edge` and `right_edge`, when set, replace those ends; they run
     bottom to top.
@@ -1254,14 +1280,18 @@ def _divider_outline(
     top_notches = top_notches or []
     floor_top = thickness if floor else 0.0
     floor_contact = floor and y0 <= 1e-6
+    top_contact = closed and y1 >= full_height - 1e-6
     bottom_pitch = full_height / end_count
     end_pitch = (full_height - floor_top) / end_count
     fx0 = 0.0 if finger_x0 is None else max(0.0, finger_x0)
     fx1 = length if finger_x1 is None else min(length, finger_x1)
-    if floor_contact and fx1 > fx0 + 1.0:
-        finger_spans = [(a + fx0, b + fx0) for a, b in _spans_for_length(fx1 - fx0, bottom_pitch)]
-    else:
-        finger_spans = []
+    along_spans = (
+        [(a + fx0, b + fx0) for a, b in _spans_for_length(fx1 - fx0, bottom_pitch)]
+        if fx1 > fx0 + 1.0
+        else []
+    )
+    finger_spans = along_spans if floor_contact else []
+    top_finger_spans = along_spans if top_contact else []
     if bottom_notches or (floor_contact and finger_x0 is not None):
         bottom = _notched_profile(
             length,
@@ -1283,8 +1313,15 @@ def _divider_outline(
         if right_edge is not None
         else _side_edge(length, y0, y1, right_span, right_out, end_pitch, 1.0, floor_contact)
     )
-    if top_notches:
-        top = list(reversed(_notched_profile(length, [], top_notches, y1, y1, y1)))
+    if top_notches or top_contact:
+        top = list(reversed(_notched_profile(
+            length,
+            top_finger_spans,
+            top_notches,
+            full_height if top_contact else y1,
+            full_height - thickness if top_contact else y1,
+            y1,
+        )))
     else:
         top = [(length, y1), (0.0, y1)]
     left_up = (
@@ -1346,11 +1383,19 @@ def build_panels(params: InsertParams) -> List[Panel]:
         x_cursor += w + gap
         row_h = max(row_h, h)
 
-    # Floor fingers match the wall bottoms. Long walls own the corners.
+    # Floor fingers match the wall bottoms. A closed lid uses the same joint at the top.
+    # Long walls own the corners.
     pitch = H / _odd_count(fingers)
-    length_spans = _floor_joint_spans(L, T, pitch, owns_corners=True) if params.floor else []
-    width_spans = _floor_joint_spans(W, T, pitch, owns_corners=False) if params.floor else []
+    closed = params.closed_top()
+    edge_joints = params.floor or closed
+    length_spans = _floor_joint_spans(L, T, pitch, owns_corners=True) if edge_joints else []
+    width_spans = _floor_joint_spans(W, T, pitch, owns_corners=False) if edge_joints else []
     div_joints = _divider_joints(params)
+
+    def divider_slots(d: Divider, joints: List[_DivJoint], kind: str, y_open: float) -> List[Poly]:
+        if d.leans():
+            return _leaned_floor_slots(d, params, joints, notch_kind=kind, y_open=y_open)
+        return _divider_finger_slots_on_floor(d, params, joints, notch_kind=kind, y_open=y_open)
 
     if params.floor:
         floor_outline = _offset_kerf(
@@ -1360,13 +1405,21 @@ def build_panels(params: InsertParams) -> List[Panel]:
         for d, joints in zip(params.dividers, div_joints):
             # A divider that rests on the floor without fingers starts above this
             # panel, so the floor stays solid under it.
-            plate = d.plate_span(H, T, True)
+            plate = d.plate_span(H, T, True, closed)
             if plate is not None and plate[0] <= 1e-6:
-                if d.leans():
-                    floor_holes.extend(_leaned_floor_slots(d, params, joints))
-                else:
-                    floor_holes.extend(_divider_finger_slots_on_floor(d, params, joints))
+                floor_holes.extend(divider_slots(d, joints, "cross-bottom", 0.0))
         place("floor", floor_outline, floor_holes, L, W)
+
+    if closed:
+        lid_outline = _offset_kerf(
+            _floor_outline(L, W, T, length_spans, width_spans), params.kerf, outward=True
+        )
+        lid_holes: List[Poly] = []
+        for d, joints in zip(params.dividers, div_joints):
+            plate = d.plate_span(H, T, params.floor, True)
+            if plate is not None and plate[1] >= H - 1e-6:
+                lid_holes.extend(divider_slots(d, joints, "cross-top", H))
+        place("lid-closed", lid_outline, lid_holes, L, W, "Lid")
 
     # Four walls: long, long, short, short
     # Front/back: length L, fingers on short ends; left/right: length W
@@ -1384,9 +1437,10 @@ def build_panels(params: InsertParams) -> List[Panel]:
             fingers,
             left_male,
             right_male,
-            floor_spans or None,
+            floor_spans if params.floor else None,
             left_joint=params.wall_joint(name, True),
             right_joint=params.wall_joint(name, False),
+            top_fingers=floor_spans if closed else None,
         )
         outline = _offset_kerf(outline, params.kerf, outward=True)
         holes: List[Poly] = []
@@ -1399,7 +1453,7 @@ def build_panels(params: InsertParams) -> List[Panel]:
     floor_top = T if params.floor else 0.0
     end_pitch = (H - floor_top) / _odd_count(fingers)
     for i, d in enumerate(params.dividers):
-        plate = d.plate_span(H, T, params.floor)
+        plate = d.plate_span(H, T, params.floor, closed)
         if plate is None:
             continue
         y0, y1 = plate
@@ -1422,7 +1476,8 @@ def build_panels(params: InsertParams) -> List[Panel]:
                 d.label,
             )
             continue
-        own_fingers = (max(y0, floor_top), y1)
+        lid_base = H - T if closed else y1
+        own_fingers = (max(y0, floor_top), min(y1, lid_base))
 
         def end_span(at_start: bool, hits_wall: bool) -> Tuple[float, float] | None:
             if hits_wall:
@@ -1481,6 +1536,7 @@ def build_panels(params: InsertParams) -> List[Panel]:
             mate_right,
             end_reach(True),
             end_reach(False),
+            closed,
         )
         holes = _tee_holes(joints, left_inset, body, H, T, params.kerf, end_pitch, params.floor)
         holes.extend(_closed_cross_holes(joints, left_inset, body, y0, y1, params.kerf))
@@ -1799,7 +1855,13 @@ def _lean_finger_holes(
     return holes
 
 
-def _leaned_floor_slots(d: Divider, params: InsertParams, joints: List[_DivJoint]) -> List[Poly]:
+def _leaned_floor_slots(
+    d: Divider,
+    params: InsertParams,
+    joints: List[_DivJoint],
+    notch_kind: str = "cross-bottom",
+    y_open: float = 0.0,
+) -> List[Poly]:
     """Finger slots for a leaned divider. The sheet crosses the floor at an angle, so each slot is wider."""
     length = _divider_length(d)
     if length < 1e-6:
@@ -1808,7 +1870,7 @@ def _leaned_floor_slots(d: Divider, params: InsertParams, joints: List[_DivJoint
     t0, t1 = _floor_finger_limits(length, joints, params.thickness)
     pitch = params.height / _odd_count(params.finger_count)
     spans = [(a + t0, b + t0) for a, b in _spans_for_length(max(0.0, t1 - t0), pitch)]
-    spans = _subtract_spans(spans, _notch_intervals(joints, "cross-bottom", params.kerf, y_open=0.0))
+    spans = _subtract_spans(spans, _notch_intervals(joints, notch_kind, params.kerf, y_open=y_open))
     holes: List[Poly] = []
     for a, b in spans:
         if b - a < 1.0:
@@ -1831,13 +1893,15 @@ def _leaned_wall_slots(
 
     A square end is fingered along the slant. Any other end keeps one slot.
     """
-    plate = d.plate_span(params.height, thickness, params.floor)
+    plate = d.plate_span(params.height, thickness, params.floor, params.closed_top())
     if plate is None:
         return []
     y0, y1 = plate
     floor_top = thickness if params.floor else 0.0
     z0 = max(y0, floor_top)
     z1 = min(y1, wall_height)
+    if params.closed_top():
+        z1 = min(z1, params.height - params.thickness)
     if z1 < z0 + 1.0:
         return []
     ux, uy, length = _unit_dir(d)
@@ -1949,15 +2013,18 @@ def _leaned_divider_plate(
     thickness = params.thickness
     floor_top = thickness if params.floor else 0.0
     tongue = floor_top / cos_a if params.floor and y0 <= 1e-6 else 0.0
+    lid_tongue = (
+        thickness / cos_a
+        if params.closed_top() and d.top_fingers and y1 >= params.height - 1e-6
+        else 0.0
+    )
     end_pitch = (params.height - floor_top) / _odd_count(params.finger_count)
     bottom_pitch = params.height / _odd_count(params.finger_count)
     kerf = params.kerf
     t0, t1 = _floor_finger_limits(length, joints, thickness)
-    finger_spans = (
-        [(a + t0, b + t0) for a, b in _spans_for_length(max(0.0, t1 - t0), bottom_pitch)]
-        if tongue > 0.0
-        else []
-    )
+    along_spans = [(a + t0, b + t0) for a, b in _spans_for_length(max(0.0, t1 - t0), bottom_pitch)]
+    finger_spans = along_spans if tongue > 0.0 else []
+    top_spans = along_spans if lid_tongue > 0.0 else []
     bottom_notches: List[Tuple[float, float, float]] = []
     top_notches: List[Tuple[float, float, float]] = []
     holes: List[Poly] = []
@@ -2000,8 +2067,15 @@ def _leaned_divider_plate(
     )
     gap_y = tongue if tongue > 0.0 else 0.0
     bottom = _notched_profile(length, finger_spans, bottom_notches, 0.0, gap_y, 0.0)
-    if top_notches:
-        top = list(reversed(_notched_profile(length, [], top_notches, slant, slant, slant)))
+    if top_notches or lid_tongue > 0.0:
+        top = list(reversed(_notched_profile(
+            length,
+            top_spans,
+            top_notches,
+            slant,
+            slant - lid_tongue if lid_tongue > 0.0 else slant,
+            slant,
+        )))
     else:
         top = [(length, slant), (0.0, slant)]
     bottom, top = _attach_angled_ends(bottom, top, left or None, right or None)
@@ -2024,12 +2098,14 @@ def _divider_end_slots_for_wall(
     """Finger notches where a divider end meets this wall. Angled ends keep a single slot."""
     if d.leans():
         return _leaned_wall_slots(wall_name, wall_length, wall_height, thickness, d, params)
-    plate = d.plate_span(params.height, thickness, params.floor)
+    plate = d.plate_span(params.height, thickness, params.floor, params.closed_top())
     if plate is None:
         return []
     floor_top = thickness if params.floor else 0.0
     finger_lo = max(plate[0], floor_top)
     finger_hi = plate[1]
+    if params.closed_top():
+        finger_hi = min(finger_hi, params.height - params.thickness)
     pitch = (params.height - floor_top) / _odd_count(params.finger_count)
     holes: List[Poly] = []
     ends = (
@@ -2113,9 +2189,10 @@ def _latch_wall_holes(params: InsertParams, wall_name: str) -> List[Poly]:
     """Slots the lid tabs enter. The spring itself is cut in the lid."""
     if params.lid != "latch":
         return []
-    if wall_name == "wall-back":
+    latch_wall, stop_wall = params.latch_walls()
+    if wall_name == stop_wall:
         spans = params.latch_back_tabs()
-    elif wall_name == "wall-front":
+    elif wall_name == latch_wall:
         spans = params.latch_tab_spans()
     else:
         return []
@@ -2128,11 +2205,11 @@ def _latch_wall_holes(params: InsertParams, wall_name: str) -> List[Poly]:
 
 
 def _latch_lid_holes(params: InsertParams) -> List[Poly]:
-    """Serpentine and finger hole for each front tab, in box coordinates.
+    """Serpentine and finger hole for each spring tab, in box coordinates.
 
     The cuts leave a zigzag of the lid leading out to the tab. Pulling the
     finger hole toward the middle shortens that zigzag and draws the tab out
-    of the front-wall slot.
+    of the slot in the latch wall.
     """
     loops, beam, gap, width, _hole_r, _hole_cy, spring_y0 = params._latch_layout()
     if loops < 2 or width < 8.0 or beam < 0.6 or gap < 0.4:
@@ -2140,6 +2217,17 @@ def _latch_lid_holes(params: InsertParams) -> List[Poly]:
     thickness = params.thickness
     holes: List[Poly] = []
     pad = 0.08
+
+    def cut(across0: float, inward0: float, across1: float, inward1: float) -> None:
+        if across1 - across0 < 0.3 or inward1 - inward0 < 0.3:
+            return
+        holes.append([
+            params.latch_point(across0 - pad, inward0 - pad),
+            params.latch_point(across1 + pad, inward0 - pad),
+            params.latch_point(across1 + pad, inward1 + pad),
+            params.latch_point(across0 - pad, inward1 + pad),
+        ])
+
     for center in params.latch_centers():
         x0 = center - width / 2.0
         x1 = center + width / 2.0
@@ -2152,44 +2240,38 @@ def _latch_lid_holes(params: InsertParams) -> List[Poly]:
         connector_left = last % 2 == 0
         left_end = beam_y(last) if connector_left else last_top + gap
         right_end = last_top + gap if connector_left else beam_y(last)
-        rects = [
-            (x0 - gap, thickness - 0.4, x0, left_end),
-            (x1, thickness - 0.4, x1 + gap, right_end),
-        ]
+        cut(x0 - gap, thickness - 0.4, x0, left_end)
+        cut(x1, thickness - 0.4, x1 + gap, right_end)
         for index in range(loops):
             yb0 = beam_y(index)
             yb1 = yb0 + beam
             if index % 2 == 0:
-                rects.append((x1 - gap, yb0, x1, yb1))
+                cut(x1 - gap, yb0, x1, yb1)
             else:
-                rects.append((x0, yb0, x0 + gap, yb1))
+                cut(x0, yb0, x0 + gap, yb1)
         for index in range(loops - 1):
             yg0 = beam_y(index) + beam
             yg1 = yg0 + gap
             if index % 2 == 0:
-                rects.append((x0 + beam, yg0, x1, yg1))
+                cut(x0 + beam, yg0, x1, yg1)
             else:
-                rects.append((x0, yg0, x1 - beam, yg1))
+                cut(x0, yg0, x1 - beam, yg1)
         if connector_left:
-            rects.append((x0 + beam, last_top, x1 + gap, last_top + gap))
+            cut(x0 + beam, last_top, x1 + gap, last_top + gap)
         else:
-            rects.append((x0 - gap, last_top, x1 - beam, last_top + gap))
-        for left, bottom, right, upper in rects:
-            if right - left < 0.3 or upper - bottom < 0.3:
-                continue
-            holes.append(_rect(left - pad, bottom - pad, right - left + 2.0 * pad, upper - bottom + 2.0 * pad))
+            cut(x0 - gap, last_top, x1 - beam, last_top + gap)
     holes.extend(params.latch_finger_holes(params.kerf))
     return holes
 
 
 def _add_latch_lid(params: InsertParams, place) -> None:
-    """One sheet. The front tabs and their springs are part of it, and two plain tabs enter the back wall."""
+    """One sheet. The spring tabs enter the chosen wall, and two plain tabs enter the opposite wall."""
     thickness = params.thickness
-    length = params.outer_length
-    width = params.outer_width
+    across, along = params.latch_axes()
     pts: Poly = []
 
-    def add(x: float, y: float) -> None:
+    def add(u: float, v: float) -> None:
+        x, y = params.latch_point(u, v)
         if not pts or abs(pts[-1][0] - x) > 1e-9 or abs(pts[-1][1] - y) > 1e-9:
             pts.append((x, y))
 
@@ -2199,14 +2281,14 @@ def _add_latch_lid(params: InsertParams, place) -> None:
         add(left, 0.0)
         add(right, 0.0)
         add(right, thickness)
-    add(length - thickness, thickness)
-    add(length - thickness, width - thickness)
+    add(across - thickness, thickness)
+    add(across - thickness, along - thickness)
     for left, right in reversed(params.latch_back_tabs()):
-        add(right, width - thickness)
-        add(right, width)
-        add(left, width)
-        add(left, width - thickness)
-    add(thickness, width - thickness)
+        add(right, along - thickness)
+        add(right, along)
+        add(left, along)
+        add(left, along - thickness)
+    add(thickness, along - thickness)
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     minx, miny = min(xs), min(ys)
@@ -2305,7 +2387,7 @@ def _add_lid_panels(params: InsertParams, place) -> None:
     Each tab is an L of two strips. The strips are tall enough to fill the lid
     and keep going down into the box. Inner and outer use the same pieces.
     """
-    if params.lid == "none":
+    if params.lid == "none" or params.closed_top():
         return
     if params.lid == "slide":
         _add_slide_lid(params, place)

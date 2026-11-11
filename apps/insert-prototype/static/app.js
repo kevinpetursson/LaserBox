@@ -8,6 +8,7 @@ let tabFit = "inner";
 let slideDir = "back";
 let slideCount = 2;
 let latchCount = 1;
+let latchSide = "front";
 
 function roundMm(n) {
   return Math.round(n * 100) / 100;
@@ -46,6 +47,7 @@ function readParams() {
   params.lid_slide_count = slideCount;
   const slideTab = parseFloat(el("lid-slide-tab").value);
   params.lid_slide_tab = Math.min(80, Math.max(wallT, Number.isFinite(slideTab) ? slideTab : 20));
+  params.lid_latch_side = latchSide;
   params.lid_latch_count = latchCount === 2 ? 2 : 1;
   const latchLoops = parseInt(el("lid-latch-loops").value, 10);
   params.lid_latch_loops = Math.min(8, Math.max(2, Number.isFinite(latchLoops) ? latchLoops : 4));
@@ -72,6 +74,7 @@ function readParams() {
       top: gap(".h-top"),
       tilt: Math.max(-75, Math.min(75, Number.isFinite(num(".h-tilt")) ? num(".h-tilt") : 0)),
       floor_fingers: row.querySelector(".h-floor-fingers").checked,
+      top_fingers: row.querySelector(".h-top-fingers").checked,
       label: (row.dataset.label || "").replace(/\s+/g, " ").trim().slice(0, 40),
     });
   });
@@ -92,8 +95,8 @@ function updateDimLabels() {
     : "Outside width, measured across the outside of the walls. The inside width is this minus twice the material thickness.";
   el("height-label").textContent = inside ? "Height ID (mm)" : "Height OD (mm)";
   el("tip-height").textContent = inside
-    ? "Inside height, from the top of the floor to the top of the walls. The outside height is this plus the material thickness. With no floor, inside and outside height are the same."
-    : "Outside height, from the bottom of the box to the top of the walls. With a floor, the inside height is this minus the material thickness. With no floor, they are the same.";
+    ? "Inside height, from the top of the floor to the top of the walls. The outside height is this plus the material thickness. With no floor, inside and outside height are the same. When a lid makes the box taller, the note under this box shows the overall outside height."
+    : "Outside height, from the bottom of the box to the top of the walls. With a floor, the inside height is this minus the material thickness. With no floor, they are the same. When a lid makes the box taller, the note under this box shows the overall outside height.";
   el("side-height-label").textContent = inside ? "Side height ID (mm)" : "Side height OD (mm)";
 }
 
@@ -156,13 +159,13 @@ function syncLidFields() {
   el("lid-tab-fields").hidden = lidMode !== "top" || !el("lid-tabs-on").checked;
   el("lid-slide-row").hidden = lidMode !== "slide";
   el("lid-latch-row").hidden = lidMode !== "latch";
-  el("lid-none").setAttribute("aria-pressed", lidMode === "none" ? "true" : "false");
-  el("lid-cap").setAttribute("aria-pressed", lidMode === "cap" ? "true" : "false");
-  el("lid-top").setAttribute("aria-pressed", lidMode === "top" ? "true" : "false");
-  el("lid-slide").setAttribute("aria-pressed", lidMode === "slide" ? "true" : "false");
-  el("lid-latch").setAttribute("aria-pressed", lidMode === "latch" ? "true" : "false");
+  el("lid").value = lidMode;
+  dividerRows().forEach(syncTopJoint);
   el("latch-tabs-1").setAttribute("aria-pressed", latchCount === 1 ? "true" : "false");
   el("latch-tabs-2").setAttribute("aria-pressed", latchCount === 2 ? "true" : "false");
+  for (const side of ["front", "back", "left", "right"]) {
+    el(`latch-${side}`).setAttribute("aria-pressed", latchSide === side ? "true" : "false");
+  }
   el("tab-inner").setAttribute("aria-pressed", tabFit === "inner" ? "true" : "false");
   el("tab-outer").setAttribute("aria-pressed", tabFit === "outer" ? "true" : "false");
   for (const dir of ["back", "front", "left", "right"]) {
@@ -172,8 +175,14 @@ function syncLidFields() {
   el("slide-tabs-3").setAttribute("aria-pressed", slideCount === 3 ? "true" : "false");
 }
 
+function knownLid(value) {
+  return value === "cap" || value === "top" || value === "slide" || value === "latch" || value === "closed"
+    ? value
+    : "none";
+}
+
 function setLidMode(next) {
-  lidMode = next === "cap" || next === "top" || next === "slide" || next === "latch" ? next : "none";
+  lidMode = knownLid(next);
   syncLidFields();
   draw();
 }
@@ -184,6 +193,41 @@ function setLatchCount(next) {
   latchCount = count;
   syncLidFields();
   draw();
+}
+
+function setLatchSide(next) {
+  if (!["front", "back", "left", "right"].includes(next) || next === latchSide) return;
+  latchSide = next;
+  syncLidFields();
+  draw();
+}
+
+function lidInsideSide() {
+  const shown = parseFloat(el("lid-height").value);
+  const side = Number.isFinite(shown) ? shown : 15;
+  return dimMode === "outside" ? side - materialThickness() : side;
+}
+
+function overallOutsideHeight() {
+  const box = outsideHeight();
+  const thickness = materialThickness();
+  if (lidMode === "slide" || lidMode === "latch") return box + 2 * thickness;
+  if (lidMode === "cap") return box + thickness;
+  if (lidMode === "top") return box + Math.max(0, lidInsideSide()) + thickness;
+  return box;
+}
+
+function syncHeightOverall() {
+  const note = el("height-overall");
+  const box = outsideHeight();
+  const overall = roundMm(overallOutsideHeight());
+  if (!(overall > box + 0.05)) {
+    note.hidden = true;
+    note.textContent = "";
+    return;
+  }
+  note.hidden = false;
+  note.textContent = `Overall OD ${overall} mm`;
 }
 
 function setSlideDir(next) {
@@ -303,6 +347,22 @@ function syncFloorJoint(row) {
   input.closest("label").title = note;
 }
 
+function syncTopJoint(row) {
+  const input = row.querySelector(".h-top-fingers");
+  if (!input) return;
+  const gap = parseFloat(row.querySelector(".h-top").value);
+  const short = Number.isFinite(gap) && gap > 0;
+  const open = lidMode !== "closed";
+  input.disabled = short || open;
+  const note = open
+    ? "Only a closed box has a top panel to joint into."
+    : short
+      ? "This divider stops below the top, so it is not jointed into the lid."
+      : "Uncheck to stop this divider under the lid with a straight edge and no slots in the lid.";
+  input.title = note;
+  input.closest("label").title = note;
+}
+
 function syncHeightUnit(row) {
   const pct = row.dataset.heightUnit === "pct";
   const unit = pct ? "%" : "mm";
@@ -377,6 +437,7 @@ function setHeightUnit(row, next) {
   syncHeightUnit(row);
   enforceDividerGaps(row);
   syncFloorJoint(row);
+  syncTopJoint(row);
   draw();
 }
 
@@ -390,6 +451,7 @@ function addDividerRow(d) {
   const top = Number.isFinite(divider.top) ? divider.top : 0;
   const tilt = Number.isFinite(divider.tilt) ? divider.tilt : 0;
   const floorFingers = divider.floor_fingers !== false;
+  const topFingers = divider.top_fingers !== false;
   row.innerHTML = `
     <div class="divider-head">
       <button type="button" class="divider-select" aria-pressed="false">Select</button>
@@ -411,6 +473,10 @@ function addDividerRow(d) {
         <input class="h-floor-fingers" type="checkbox"${floorFingers ? " checked" : ""} />
         <span>Finger joint to floor</span>
       </label>
+      <label class="check top-fingers">
+        <input class="h-top-fingers" type="checkbox"${topFingers ? " checked" : ""} />
+        <span>Finger joint to top</span>
+      </label>
       <p class="gap-warn" role="alert" hidden></p>
     </div>
     <div class="divider-tilt">
@@ -427,6 +493,7 @@ function addDividerRow(d) {
   syncHeightUnit(row);
   enforceDividerGaps(row);
   syncFloorJoint(row);
+  syncTopJoint(row);
   row.querySelector(".divider-select").addEventListener("click", () => selectDivider(row));
   row.querySelectorAll(".divider-height [data-unit]").forEach((btn) => {
     btn.addEventListener("click", () => setHeightUnit(row, btn.dataset.unit));
@@ -441,6 +508,7 @@ function addDividerRow(d) {
     input.addEventListener("input", () => {
       enforceDividerGaps(row);
       if (input.classList.contains("h-bottom")) syncFloorJoint(row);
+      if (input.classList.contains("h-top")) syncTopJoint(row);
     });
   });
   row.querySelectorAll("input").forEach((inp) => inp.addEventListener("input", draw));
@@ -456,6 +524,8 @@ let previewAbort = null;
 let previewBusy = false;
 let previewGen = 0;
 let planDrag = null;
+const drawingView = { zoom: 1, panX: 0, panY: 0 };
+let drawingFrame = null;
 
 function fitCanvas(canvas) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -651,9 +721,11 @@ function paint2d(panels) {
   const pad = 28;
   const spanX = Math.max(maxX - minX, 1);
   const spanY = Math.max(maxY - minY, 1);
-  const scale = Math.min((w - 2 * pad) / spanX, (h - 2 * pad) / spanY);
-  const ox = (w - spanX * scale) / 2;
-  const oy = (h - spanY * scale) / 2;
+  const base = Math.min((w - 2 * pad) / spanX, (h - 2 * pad) / spanY);
+  const scale = base * drawingView.zoom;
+  const ox = (w - spanX * scale) / 2 + drawingView.panX;
+  const oy = (h - spanY * scale) / 2 + drawingView.panY;
+  drawingFrame = { minX, minY, spanX, spanY, base, w, h };
   const sx = (x) => ox + (x - minX) * scale;
   const sy = (y) => oy + (y - minY) * scale;
 
@@ -1359,6 +1431,7 @@ function kickPreview() {
 }
 
 function draw() {
+  syncHeightOverall();
   paintPlan();
   clearTimeout(previewTimer);
   previewTimer = setTimeout(refreshPreview, 60);
@@ -1433,8 +1506,9 @@ async function loadDefaults() {
   el("width").value = roundMm(d.width - 2 * wall);
   el("height").value = roundMm(d.height - (d.floor ? wall : 0));
   el("floor").checked = !!d.floor;
-  lidMode = d.lid === "cap" || d.lid === "top" || d.lid === "slide" || d.lid === "latch" ? d.lid : "none";
+  lidMode = knownLid(d.lid);
   latchCount = d.lid_latch_count === 2 ? 2 : 1;
+  latchSide = ["front", "back", "left", "right"].includes(d.lid_latch_side) ? d.lid_latch_side : "front";
   el("lid-latch-loops").value = d.lid_latch_loops ?? 4;
   el("lid-latch-beam").value = d.lid_latch_beam ?? 2;
   el("lid-latch-width").value = d.lid_latch_width ?? 30;
@@ -1493,6 +1567,7 @@ function designConfig() {
     lid_slide: slideDir,
     lid_slide_count: slideCount,
     lid_slide_tab: asNumber(el("lid-slide-tab").value, 20),
+    lid_latch_side: latchSide,
     lid_latch_count: latchCount === 2 ? 2 : 1,
     lid_latch_loops: parseInt(el("lid-latch-loops").value, 10) || 4,
     lid_latch_beam: asNumber(el("lid-latch-beam").value, 2),
@@ -1510,6 +1585,7 @@ function designConfig() {
         heightUnit: row.dataset.heightUnit === "pct" ? "pct" : "mm",
         tilt: n(".h-tilt"),
         floor_fingers: row.querySelector(".h-floor-fingers").checked,
+        top_fingers: row.querySelector(".h-top-fingers").checked,
       };
     }),
   };
@@ -1560,13 +1636,18 @@ function designProblems(data) {
   if (!Number.isInteger(data.finger_count) || data.finger_count < 3 || data.finger_count > 15) {
     problems.push("Finger count must be a whole number from 3 to 15.");
   }
-  if (!["none", "cap", "top", "slide", "latch"].includes(data.lid)) {
-    problems.push("Lid must be none, a cap, sit on top, tab and slot, or latch.");
+  if (!["none", "cap", "top", "slide", "latch", "closed"].includes(data.lid)) {
+    problems.push("Lid must be none, a cap, sit on top, tab and slot, latch, or a closed box.");
   }
   const latchRequired = data.version >= 2;
+  if (latchRequired || data.lid_latch_side != null) {
+    if (!["front", "back", "left", "right"].includes(data.lid_latch_side)) {
+      problems.push("Latches on must be front, back, left, or right.");
+    }
+  }
   if (latchRequired || data.lid_latch_count != null) {
     if (data.lid_latch_count !== 1 && data.lid_latch_count !== 2) {
-      problems.push("Front tabs must be 1 or 2.");
+      problems.push("Latch tabs must be 1 or 2.");
     }
   }
   if (latchRequired || data.lid_latch_loops != null) {
@@ -1660,6 +1741,11 @@ function designProblems(data) {
     }
     if (typeof div.floor_fingers !== "boolean") {
       problems.push(`${name} finger joint to floor must be on or off.`);
+    }
+    if (data.version >= 2 || div.top_fingers != null) {
+      if (typeof div.top_fingers !== "boolean") {
+        problems.push(`${name} finger joint to top must be on or off.`);
+      }
     }
     if (div.label != null && (typeof div.label !== "string" || div.label.length > 40)) {
       problems.push(`${name} name must be 40 characters or fewer.`);
@@ -1768,8 +1854,9 @@ function applyDesign(data) {
   el("floor").checked = !!data.floor;
   el("snap-mm").checked = data.snap !== false;
 
-  lidMode = data.lid === "cap" || data.lid === "top" || data.lid === "slide" || data.lid === "latch" ? data.lid : "none";
+  lidMode = knownLid(data.lid);
   latchCount = data.lid_latch_count === 2 ? 2 : 1;
+  latchSide = ["front", "back", "left", "right"].includes(data.lid_latch_side) ? data.lid_latch_side : "front";
   el("lid-latch-loops").value = data.lid_latch_loops ?? 4;
   el("lid-latch-beam").value = asNumber(data.lid_latch_beam, 2);
   el("lid-latch-width").value = asNumber(data.lid_latch_width, 30);
@@ -1798,6 +1885,7 @@ function applyDesign(data) {
     heightUnit: div.heightUnit === "pct" ? "pct" : "mm",
     tilt: asNumber(div.tilt, 0),
     floor_fingers: div.floor_fingers !== false,
+    top_fingers: div.top_fingers !== false,
   }));
 
   syncLidFields();
@@ -1893,22 +1981,19 @@ el("add-divider").addEventListener("click", () => {
   draw();
 });
 
-function setPreviewHeight(px) {
-  const canvas = el("view3d");
+function setPreviewHeight(canvas, px) {
   const next = Math.max(140, Math.min(window.innerHeight * 0.85, px));
   canvas.style.aspectRatio = "auto";
   canvas.style.height = `${Math.round(next)}px`;
 }
 
-function bindPreviewResize() {
-  const handle = el("view3d-resize");
-  const canvas = el("view3d");
+function bindPreviewResize(handle, canvas) {
   handle.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     const startY = event.clientY;
     const startH = canvas.getBoundingClientRect().height;
     try { handle.setPointerCapture(event.pointerId); } catch (err) { /* drag still follows the pointer */ }
-    const move = (ev) => setPreviewHeight(startH + (ev.clientY - startY));
+    const move = (ev) => setPreviewHeight(canvas, startH + (ev.clientY - startY));
     const end = () => {
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", end);
@@ -1922,8 +2007,67 @@ function bindPreviewResize() {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     event.preventDefault();
     const delta = event.key === "ArrowDown" ? 32 : -32;
-    setPreviewHeight(canvas.getBoundingClientRect().height + delta);
+    setPreviewHeight(canvas, canvas.getBoundingClientRect().height + delta);
   });
+}
+
+function fitDrawing() {
+  drawingView.zoom = 1;
+  drawingView.panX = 0;
+  drawingView.panY = 0;
+  redraw();
+}
+
+function bindDrawing() {
+  const canvas = el("drawing");
+  let drag = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    drag = { x: event.clientX, y: event.clientY, panX: drawingView.panX, panY: drawingView.panY };
+    try { canvas.setPointerCapture(event.pointerId); } catch (err) { /* drag still follows the pointer */ }
+    canvas.classList.add("is-panning");
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!drag) return;
+    drawingView.panX = drag.panX + (event.clientX - drag.x);
+    drawingView.panY = drag.panY + (event.clientY - drag.y);
+    redraw();
+  });
+  const end = () => {
+    drag = null;
+    canvas.classList.remove("is-panning");
+  };
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("pointercancel", end);
+  canvas.addEventListener("dblclick", fitDrawing);
+  el("drawing-fit").addEventListener("click", fitDrawing);
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    if (!drawingFrame) return;
+    const rect = canvas.getBoundingClientRect();
+    const borderLeft = parseFloat(getComputedStyle(canvas).borderLeftWidth) || 0;
+    const borderTop = parseFloat(getComputedStyle(canvas).borderTopWidth) || 0;
+    const px = event.clientX - rect.left - borderLeft;
+    const py = event.clientY - rect.top - borderTop;
+    const { minX, minY, spanX, spanY, base, w, h } = drawingFrame;
+    const oldScale = base * drawingView.zoom;
+    const oldOx = (w - spanX * oldScale) / 2 + drawingView.panX;
+    const oldOy = (h - spanY * oldScale) / 2 + drawingView.panY;
+    const worldX = minX + (px - oldOx) / oldScale;
+    const worldY = minY + (py - oldOy) / oldScale;
+    const next = Math.max(1, Math.min(16, drawingView.zoom * (event.deltaY > 0 ? 0.92 : 1.08)));
+    if (next <= 1.001) {
+      drawingView.zoom = 1;
+      drawingView.panX = 0;
+      drawingView.panY = 0;
+    } else {
+      const newScale = base * next;
+      drawingView.zoom = next;
+      drawingView.panX = px - (worldX - minX) * newScale - (w - spanX * newScale) / 2;
+      drawingView.panY = py - (worldY - minY) * newScale - (h - spanY * newScale) / 2;
+    }
+    redraw();
+  }, { passive: false });
 }
 fields.forEach((f) => el(f).addEventListener("input", () => {
   if (f === "thickness") {
@@ -1942,16 +2086,17 @@ el("floor").addEventListener("change", () => {
   }
   syncDimLimits();
   dividerRows().forEach(syncFloorJoint);
+  dividerRows().forEach(syncTopJoint);
   enforceAllDividerGaps();
   draw();
 });
-el("lid-none").addEventListener("click", () => setLidMode("none"));
-el("lid-cap").addEventListener("click", () => setLidMode("cap"));
-el("lid-top").addEventListener("click", () => setLidMode("top"));
-el("lid-slide").addEventListener("click", () => setLidMode("slide"));
-el("lid-latch").addEventListener("click", () => setLidMode("latch"));
+el("lid").addEventListener("change", () => setLidMode(el("lid").value));
 el("latch-tabs-1").addEventListener("click", () => setLatchCount(1));
 el("latch-tabs-2").addEventListener("click", () => setLatchCount(2));
+el("latch-front").addEventListener("click", () => setLatchSide("front"));
+el("latch-back").addEventListener("click", () => setLatchSide("back"));
+el("latch-left").addEventListener("click", () => setLatchSide("left"));
+el("latch-right").addEventListener("click", () => setLatchSide("right"));
 el("lid-latch-loops").addEventListener("input", draw);
 el("lid-latch-beam").addEventListener("input", draw);
 el("lid-latch-width").addEventListener("input", draw);
@@ -2040,7 +2185,10 @@ loadDefaults();
 bindTips();
 bindOrbit();
 bindPlan();
-bindPreviewResize();
+bindDrawing();
+bindPreviewResize(el("plan-resize"), el("plan"));
+bindPreviewResize(el("view3d-resize"), el("view3d"));
+bindPreviewResize(el("drawing-resize"), el("drawing"));
 const previewResize = new ResizeObserver(() => redraw());
 previewResize.observe(el("plan"));
 previewResize.observe(el("view3d"));

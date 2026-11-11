@@ -121,7 +121,7 @@ def _end_follow(
         dot = ux * onx + uy * ony
         if abs(dot) < 0.25:
             continue
-        span = other.plate_span(params.height, params.thickness, params.floor)
+        span = other.plate_span(params.height, params.thickness, params.floor, params.closed_top())
         if span is None:
             continue
         best = (math.tan(other.tilt_radians()) / dot, span[0])
@@ -206,7 +206,10 @@ def build_print_parts(params: InsertParams) -> List[Tuple[str, List[Tri]]]:
     L, W, T = params.outer_length, params.outer_width, params.thickness
 
     def wall_dz(name: str) -> float:
-        return params.wall_height(name) - z0
+        top = params.wall_height(name)
+        if params.closed_top():
+            top -= params.thickness
+        return top - z0
 
     body.extend(_box_tris(0, 0, z0, L, T, wall_dz("wall-front")))
     body.extend(_box_tris(0, W - T, z0, L, T, wall_dz("wall-back")))
@@ -217,7 +220,7 @@ def build_print_parts(params: InsertParams) -> List[Tuple[str, List[Tri]]]:
     if lid:
         parts.append(("lid", lid))
     for i, d in enumerate(params.dividers):
-        span = d.print_span(params.height, params.thickness, params.floor)
+        span = d.print_span(params.height, params.thickness, params.floor, params.closed_top())
         prism = (
             _divider_prism(d, params.thickness, span[0], span[1], params) if span is not None else []
         )
@@ -234,6 +237,9 @@ def _lid_tris(params: InsertParams) -> List[Tri]:
     """
     if params.lid == "none":
         return []
+    if params.closed_top():
+        z = params.height - params.thickness
+        return _box_tris(0.0, 0.0, z, params.outer_length, params.outer_width, params.thickness)
     if params.lid == "slide":
         return _slide_lid_tris(params)
     if params.lid == "latch":
@@ -457,42 +463,59 @@ def _slide_lid_tris(params: InsertParams) -> List[Tri]:
     return tris
 
 
+def _latch_box(params: InsertParams, across0: float, inward0: float, across1: float, inward1: float) -> tuple[float, float, float, float]:
+    """Axis-aligned box in plan, from the latch's across and inward coordinates."""
+    corners = (
+        params.latch_point(across0, inward0),
+        params.latch_point(across1, inward1),
+    )
+    xs = [point[0] for point in corners]
+    ys = [point[1] for point in corners]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    return x0, y0, x1 - x0, y1 - y0
+
+
 def _latch_lid_tris(params: InsertParams) -> List[Tri]:
-    """The lid sheet, with the front tabs in the front wall and a finger hole in each.
+    """The lid sheet, with the spring tabs in the chosen wall and a finger hole in each.
 
     The serpentine that lets those tabs pull inward is cut only in the laser file.
     """
     thickness = params.thickness
     z = params.height + 0.2
-    length, width = params.outer_length, params.outer_width
+    across, along = params.latch_axes()
     tris: List[Tri] = []
-    body = [
-        (thickness, thickness),
-        (length - thickness, thickness),
-        (length - thickness, width - thickness),
-        (thickness, width - thickness),
-    ]
+
+    def plate(across0: float, across1: float, hole: list[tuple[float, float]] | None) -> None:
+        outer = [
+            params.latch_point(across0, thickness),
+            params.latch_point(across1, thickness),
+            params.latch_point(across1, along - thickness),
+            params.latch_point(across0, along - thickness),
+        ]
+        cut = _plate_with_hole(outer, hole, z, z + thickness) if hole else None
+        if cut:
+            tris.extend(cut)
+            return
+        x, y, dx, dy = _latch_box(params, across0, thickness, across1, along - thickness)
+        tris.extend(_box_tris(x, y, z, dx, dy, thickness))
+
     holes = params.latch_finger_holes()
+    centers = params.latch_centers()
     if len(holes) == 1:
-        plate = _plate_with_hole(body, holes[0], z, z + thickness)
-        tris.extend(plate or _box_tris(thickness, thickness, z, length - 2.0 * thickness, width - 2.0 * thickness, thickness))
+        plate(thickness, across - thickness, holes[0])
     elif len(holes) >= 2:
-        mid = length / 2.0
-        for hole in holes:
-            cx = sum(point[0] for point in hole) / len(hole)
-            if cx < mid:
-                rect = [(thickness, thickness), (mid, thickness), (mid, width - thickness), (thickness, width - thickness)]
-            else:
-                rect = [(mid, thickness), (length - thickness, thickness), (length - thickness, width - thickness), (mid, width - thickness)]
-            plate = _plate_with_hole(rect, hole, z, z + thickness)
-            span = rect[1][0] - rect[0][0]
-            tris.extend(plate or _box_tris(rect[0][0], thickness, z, span, width - 2.0 * thickness, thickness))
+        mid = across / 2.0
+        for hole, center in zip(holes, centers):
+            plate(thickness if center < mid else mid, mid if center < mid else across - thickness, hole)
     else:
-        tris.extend(_box_tris(thickness, thickness, z, length - 2.0 * thickness, width - 2.0 * thickness, thickness))
+        plate(thickness, across - thickness, None)
     for left, right in params.latch_tab_spans():
-        tris.extend(_box_tris(left, 0.0, z, right - left, thickness, thickness))
+        x, y, dx, dy = _latch_box(params, left, 0.0, right, thickness)
+        tris.extend(_box_tris(x, y, z, dx, dy, thickness))
     for left, right in params.latch_back_tabs():
-        tris.extend(_box_tris(left, width - thickness, z, right - left, thickness, thickness))
+        x, y, dx, dy = _latch_box(params, left, along - thickness, right, along)
+        tris.extend(_box_tris(x, y, z, dx, dy, thickness))
     return tris
 
 

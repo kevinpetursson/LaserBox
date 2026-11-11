@@ -44,6 +44,11 @@ class Divider(BaseModel):
         description="Finger-joint a divider that sits on the floor into the floor panel. "
         "Off rests that divider on the floor with a straight edge and no floor slots.",
     )
+    top_fingers: bool = Field(
+        True,
+        description="Finger-joint a divider that reaches the top into a closed-box lid. "
+        "Off stops that divider under the lid with a straight edge and no lid slots.",
+    )
 
     @field_validator("label")
     @classmethod
@@ -59,18 +64,24 @@ class Divider(BaseModel):
         return abs(self.tilt) > 0.05
 
     def plate_span(
-        self, height: float, thickness: float, floor: bool
+        self, height: float, thickness: float, floor: bool, closed: bool = False
     ) -> tuple[float, float] | None:
         """Laser plate extent. Y=0 is the bottom of the floor.
 
         A divider that sits on the floor includes the fingers that pass through it,
         unless `floor_fingers` is off. Then it starts on top of the floor and the
         bottom edge stays straight. A raised divider starts above the floor and has
-        no floor joint. `top` shortens it down from the wall top. Returns None when
-        the two gaps leave no plate.
+        no floor joint. `top` shortens it down from the wall top. A closed lid sits
+        in the top thickness of that height. Fingers pass through it only when the
+        divider reaches the top and `top_fingers` is on. Otherwise the plate stops
+        at the underside of the lid. Returns None when the two gaps leave no plate.
         """
         floor_top = thickness if floor else 0.0
         y1 = height - max(0.0, self.top)
+        if closed and self.top_fingers and self.top <= 1e-6:
+            y1 = height
+        elif closed:
+            y1 = min(y1, height - thickness)
         if floor and self.floor_fingers and self.bottom <= 1e-6:
             y0 = 0.0
         else:
@@ -80,12 +91,14 @@ class Divider(BaseModel):
         return (y0, y1)
 
     def print_span(
-        self, height: float, thickness: float, floor: bool
+        self, height: float, thickness: float, floor: bool, closed: bool = False
     ) -> tuple[float, float] | None:
-        """Printed divider. It sits on the floor instead of passing through it."""
+        """Printed divider. It sits on the floor and stops under a closed lid."""
         floor_top = thickness if floor else 0.0
         z0 = floor_top + max(0.0, self.bottom)
         z1 = height - max(0.0, self.top)
+        if closed:
+            z1 = min(z1, height - thickness)
         if z1 < z0 + 0.5:
             return None
         return (z0, z1)
@@ -101,9 +114,9 @@ class InsertParams(BaseModel):
     kerf: float = Field(0.15, ge=0, description="Laser kerf compensation (mm)")
     floor: bool = Field(True, description="Include floor (print); default on")
     finger_count: int = Field(5, ge=3, le=15, description="Finger joints per wall edge")
-    lid: Literal["none", "cap", "top", "slide", "latch"] = Field(
+    lid: Literal["none", "cap", "top", "slide", "latch", "closed"] = Field(
         "none",
-        description="none, a cap, a lid that sits on the walls, a tab-and-slot sheet, or a spring latch",
+        description="none, a cap, a lid that sits on the walls, a tab-and-slot sheet, a spring latch, or a finger-jointed closed top",
     )
     lid_height: float = Field(
         15.0,
@@ -135,7 +148,11 @@ class InsertParams(BaseModel):
     )
     lid_slide_count: int = Field(2, ge=2, le=3, description="Tabs along each side of a tab-and-slot lid")
     lid_slide_tab: float = Field(20.0, gt=0, le=80.0, description="Length of each tab on a tab-and-slot lid")
-    lid_latch_count: int = Field(1, ge=1, le=2, description="Pull tabs on the front wall of a latch lid")
+    lid_latch_side: Literal["back", "front", "left", "right"] = Field(
+        "front",
+        description="Wall the latch spring tabs enter. The two plain tabs are on the opposite wall",
+    )
+    lid_latch_count: int = Field(1, ge=1, le=2, description="Spring tabs on the latch wall")
     lid_latch_loops: int = Field(4, ge=2, le=8, description="Serpentine loops under each latch tab")
     lid_latch_beam: float = Field(2.0, ge=1.0, le=4.0, description="Wood left between the latch cuts")
     lid_latch_width: float = Field(30.0, ge=14.0, le=80.0, description="Width of one latch spring")
@@ -176,6 +193,10 @@ class InsertParams(BaseModel):
             "left": ("wall-left", "wall-right", "wall-front", "wall-back"),
             "right": ("wall-right", "wall-left", "wall-front", "wall-back"),
         }[self.lid_slide]
+
+    def closed_top(self) -> bool:
+        """A finger-jointed panel fills the top of the walls and does not raise the box."""
+        return self.lid == "closed"
 
     def wall_height(self, name: str) -> float:
         """Top of a wall. A sliding lid raises the stop wall and both slotted sides.
@@ -316,9 +337,10 @@ class InsertParams(BaseModel):
         loops = max(2, self.lid_latch_loops)
         beam = self.lid_latch_beam + kerf
         count = 2 if self.lid_latch_count == 2 else 1
+        across, along = self.latch_axes()
         margin = max(14.0, self.thickness + 8.0)
         between = 8.0 if count == 2 else 0.0
-        usable = self.outer_length - 2.0 * margin - between
+        usable = across - 2.0 * margin - between
         each = max(0.0, usable / count) if count else 0.0
         width = min(self.lid_latch_width, each) if each > 0 else self.lid_latch_width
         if each > 0:
@@ -331,7 +353,7 @@ class InsertParams(BaseModel):
         gap = max(1.2, kerf + 0.5, travel / loops)
         spring = loops * (beam + gap)
         hole_block = (hole_r * 2.0 + 2.0 * beam + 2.4) if hole_r else (beam + 2.0)
-        budget = max(24.0, self.inner_width * 0.5)
+        budget = max(24.0, (along - 2.0 * self.thickness) * 0.5)
         while loops > 2 and self.thickness + hole_block + spring > budget:
             loops -= 1
             gap = max(1.2, kerf + 0.5, travel / max(loops, 1))
@@ -347,16 +369,42 @@ class InsertParams(BaseModel):
             spring_y0 = self.thickness + beam + 1.2
         return loops, beam, gap, width, hole_r, hole_cy, spring_y0
 
+    def latch_axes(self) -> tuple[float, float]:
+        """Outer length of the latch wall, and the outer distance across to the opposite wall."""
+        if self.lid_latch_side in ("left", "right"):
+            return self.outer_width, self.outer_length
+        return self.outer_length, self.outer_width
+
+    def latch_walls(self) -> tuple[str, str]:
+        """Wall the spring tabs enter, and the opposite wall with the two plain tabs."""
+        return {
+            "front": ("wall-front", "wall-back"),
+            "back": ("wall-back", "wall-front"),
+            "left": ("wall-left", "wall-right"),
+            "right": ("wall-right", "wall-left"),
+        }[self.lid_latch_side]
+
+    def latch_point(self, across: float, inward: float) -> tuple[float, float]:
+        """Box point. `inward` grows from the outside of the latch wall toward the middle."""
+        if self.lid_latch_side == "back":
+            return (across, self.outer_width - inward)
+        if self.lid_latch_side == "left":
+            return (inward, across)
+        if self.lid_latch_side == "right":
+            return (self.outer_length - inward, across)
+        return (across, inward)
+
     def latch_centers(self) -> list[float]:
-        """Centers of the front latch tabs, along the outside length."""
+        """Centers of the spring tabs, measured along the latch wall."""
         _loops, _beam, _gap, width, _hole_r, _hole_cy, _spring_y0 = self._latch_layout()
-        mid = self.outer_length / 2.0
+        across, _along = self.latch_axes()
+        mid = across / 2.0
         if self.lid_latch_count != 2:
             return [mid]
         return [mid - (width / 2.0 + 4.0), mid + (width / 2.0 + 4.0)]
 
     def latch_tab_spans(self) -> list[tuple[float, float]]:
-        """X interval of each front tab. The tab is part of the lid and enters the front wall."""
+        """Intervals of the spring tabs along the latch wall."""
         _loops, _beam, _gap, width, _hole_r, _hole_cy, _spring_y0 = self._latch_layout()
         half = width / 2.0
         return [(center - half, center + half) for center in self.latch_centers()]
@@ -371,7 +419,7 @@ class InsertParams(BaseModel):
         steps = 28
         for center in self.latch_centers():
             pts = [
-                (
+                self.latch_point(
                     center + radius * math.cos(2.0 * math.pi * i / steps),
                     hole_cy + radius * math.sin(2.0 * math.pi * i / steps),
                 )
@@ -387,10 +435,11 @@ class InsertParams(BaseModel):
         return holes
 
     def latch_back_tabs(self) -> list[tuple[float, float]]:
-        """X intervals of the two tabs on the back edge of the lid."""
+        """Intervals of the two plain tabs, along the wall opposite the latch."""
+        across, _along = self.latch_axes()
         tab = 16.0
         inner0 = self.thickness
-        inner1 = self.outer_length - self.thickness
+        inner1 = across - self.thickness
         span = inner1 - inner0
         if span < tab * 2.0 + 10.0:
             tab = max(8.0, (span - 10.0) / 2.0)
