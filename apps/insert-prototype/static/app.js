@@ -2051,6 +2051,7 @@ function bindPreviewResize(handle, canvas) {
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", end);
       handle.removeEventListener("pointercancel", end);
+      savePreviewLayout();
     };
     handle.addEventListener("pointermove", move);
     handle.addEventListener("pointerup", end);
@@ -2061,6 +2062,7 @@ function bindPreviewResize(handle, canvas) {
     event.preventDefault();
     const delta = event.key === "ArrowDown" ? 32 : -32;
     setPreviewHeight(canvas, canvas.getBoundingClientRect().height + delta);
+    savePreviewLayout();
   });
 }
 
@@ -2234,6 +2236,179 @@ function bindTips() {
   });
 }
 
+const PREVIEW_VIEWS = ["plan", "view3d", "drawing"];
+const PREVIEW_LAYOUT_COOKIE = "box_insert_layout";
+const PREVIEW_SLOT_LABELS = {
+  stack: ["Top", "Middle", "Bottom"],
+  "pair-above": ["Top left", "Top right", "Below"],
+  "pair-below": ["Above", "Bottom left", "Bottom right"],
+};
+let previewLayout = { mode: "stack", slots: ["plan", "view3d", "drawing"] };
+let rememberLayout = false;
+
+function validPreviewLayout(data) {
+  if (!data || !PREVIEW_SLOT_LABELS[data.mode] || !Array.isArray(data.slots)) return false;
+  if (data.slots.length !== 3 || new Set(data.slots).size !== 3) return false;
+  return data.slots.every((id) => PREVIEW_VIEWS.includes(id));
+}
+
+function readLayoutCookie() {
+  const parts = document.cookie ? document.cookie.split("; ") : [];
+  const item = parts.find((part) => part.startsWith(`${PREVIEW_LAYOUT_COOKIE}=`));
+  if (!item) return null;
+  try {
+    return JSON.parse(decodeURIComponent(item.slice(PREVIEW_LAYOUT_COOKIE.length + 1)));
+  } catch (err) {
+    return null;
+  }
+}
+
+function cleanPreviewHeights(raw) {
+  const heights = {};
+  if (!raw || typeof raw !== "object") return heights;
+  for (const id of PREVIEW_VIEWS) {
+    const n = raw[id];
+    if (typeof n === "number" && Number.isFinite(n) && n >= 140 && n <= 4000) heights[id] = Math.round(n);
+  }
+  return heights;
+}
+
+function previewHeights() {
+  const heights = {};
+  for (const id of PREVIEW_VIEWS) {
+    const canvas = el(id);
+    if (!canvas || !canvas.style.height) continue;
+    const n = parseFloat(canvas.style.height);
+    if (Number.isFinite(n)) heights[id] = Math.round(n);
+  }
+  return heights;
+}
+
+function applyPreviewHeights(heights) {
+  for (const id of PREVIEW_VIEWS) {
+    if (!(id in heights)) continue;
+    const canvas = el(id);
+    if (canvas) setPreviewHeight(canvas, heights[id]);
+  }
+}
+
+function writeLayoutCookie() {
+  const value = encodeURIComponent(JSON.stringify({
+    mode: previewLayout.mode,
+    slots: previewLayout.slots,
+    heights: previewHeights(),
+  }));
+  document.cookie = `${PREVIEW_LAYOUT_COOKIE}=${value}; Path=/; Max-Age=31536000; SameSite=Lax`;
+}
+
+function clearLayoutCookie() {
+  document.cookie = `${PREVIEW_LAYOUT_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
+}
+
+function loadPreviewLayout() {
+  try { localStorage.removeItem("box-insert-preview-layout"); } catch (err) { /* nothing stored there */ }
+  const saved = readLayoutCookie();
+  if (!validPreviewLayout(saved)) {
+    if (saved) clearLayoutCookie();
+    return;
+  }
+  previewLayout = {
+    mode: saved.mode,
+    slots: saved.slots.slice(),
+    heights: cleanPreviewHeights(saved.heights),
+  };
+  rememberLayout = true;
+}
+
+function savePreviewLayout() {
+  if (!rememberLayout) return;
+  previewLayout.heights = previewHeights();
+  writeLayoutCookie();
+}
+
+function syncPreviewLayout() {
+  const column = el("preview-column");
+  if (!column) return;
+  column.dataset.layout = previewLayout.mode;
+  const letters = ["a", "b", "c"];
+  previewLayout.slots.forEach((id, index) => {
+    const section = document.querySelector(`[data-view="${id}"]`);
+    if (section) section.dataset.slot = letters[index];
+    const label = el(`slot-label-${index}`);
+    const select = el(`slot-${index}`);
+    if (label) label.textContent = PREVIEW_SLOT_LABELS[previewLayout.mode][index];
+    if (select) select.value = id;
+  });
+  document.querySelectorAll("[data-layout-mode]").forEach((btn) => {
+    btn.setAttribute("aria-pressed", btn.dataset.layoutMode === previewLayout.mode ? "true" : "false");
+  });
+  const remember = el("layout-remember");
+  if (remember) remember.checked = rememberLayout;
+  applyPreviewHeights(previewLayout.heights || {});
+  requestAnimationFrame(() => redraw());
+}
+
+function setPreviewMode(mode) {
+  if (!PREVIEW_SLOT_LABELS[mode] || previewLayout.mode === mode) return;
+  previewLayout.mode = mode;
+  savePreviewLayout();
+  syncPreviewLayout();
+}
+
+function setPreviewSlot(index, view) {
+  if (!PREVIEW_VIEWS.includes(view) || previewLayout.slots[index] === view) return;
+  const other = previewLayout.slots.indexOf(view);
+  if (other >= 0) previewLayout.slots[other] = previewLayout.slots[index];
+  previewLayout.slots[index] = view;
+  savePreviewLayout();
+  syncPreviewLayout();
+}
+
+function setLayoutPop(open) {
+  const pop = el("layout-pop");
+  const btn = el("layout-open");
+  if (!pop || !btn) return;
+  pop.hidden = !open;
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function bindPreviewLayout() {
+  loadPreviewLayout();
+  const opener = el("layout-open");
+  const pop = el("layout-pop");
+  if (opener && pop) {
+    opener.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setLayoutPop(opener.getAttribute("aria-expanded") !== "true");
+    });
+    document.addEventListener("click", (event) => {
+      if (pop.hidden || pop.contains(event.target) || opener.contains(event.target)) return;
+      setLayoutPop(false);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") setLayoutPop(false);
+    });
+  }
+  document.querySelectorAll("[data-layout-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => setPreviewMode(btn.dataset.layoutMode));
+  });
+  PREVIEW_VIEWS.forEach((_, index) => {
+    const select = el(`slot-${index}`);
+    if (!select) return;
+    select.addEventListener("change", () => setPreviewSlot(index, select.value));
+  });
+  const remember = el("layout-remember");
+  if (remember) {
+    remember.addEventListener("change", () => {
+      rememberLayout = remember.checked;
+      if (rememberLayout) savePreviewLayout();
+      else clearLayoutCookie();
+    });
+  }
+  syncPreviewLayout();
+}
+
+bindPreviewLayout();
 loadDefaults();
 bindTips();
 bindOrbit();

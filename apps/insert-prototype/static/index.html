@@ -4,11 +4,56 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Box Inserts — prototype</title>
-  <link rel="stylesheet" href="/static/style.css?v=plan-name" />
+  <link rel="stylesheet" href="/static/style.css?v=layout-pop3" />
 </head>
 <body>
   <header>
-    <h1>Box Inserts</h1>
+    <div class="title-row">
+      <h1>Box Inserts</h1>
+      <button type="button" id="layout-open" class="layout-open" aria-expanded="false" aria-controls="layout-pop" aria-haspopup="dialog" aria-label="Arrange the plan, 3D preview, and 2D drawing">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="2" y="3" width="8" height="18" rx="1.6"></rect>
+          <rect x="13" y="3" width="9" height="8" rx="1.6"></rect>
+          <rect x="13" y="13" width="9" height="8" rx="1.6"></rect>
+        </svg>
+      </button>
+      <div id="layout-pop" class="layout-pop" role="dialog" aria-label="Preview layout" hidden>
+        <p class="layout-pop-title">Arrange the views</p>
+        <div class="seg" role="group" aria-label="How the three views are arranged">
+          <button type="button" data-layout-mode="stack" aria-pressed="true">Stacked</button>
+          <button type="button" data-layout-mode="pair-above" aria-pressed="false">Two on top</button>
+          <button type="button" data-layout-mode="pair-below" aria-pressed="false">Two below</button>
+        </div>
+        <div class="preview-slots">
+          <label><span id="slot-label-0">Top</span>
+            <select id="slot-0">
+              <option value="plan">Plan</option>
+              <option value="view3d">3D preview</option>
+              <option value="drawing">2D drawing</option>
+            </select>
+          </label>
+          <label><span id="slot-label-1">Middle</span>
+            <select id="slot-1">
+              <option value="plan">Plan</option>
+              <option value="view3d" selected>3D preview</option>
+              <option value="drawing">2D drawing</option>
+            </select>
+          </label>
+          <label><span id="slot-label-2">Bottom</span>
+            <select id="slot-2">
+              <option value="plan">Plan</option>
+              <option value="view3d">3D preview</option>
+              <option value="drawing" selected>2D drawing</option>
+            </select>
+          </label>
+        </div>
+        <label class="check layout-remember">
+          <input id="layout-remember" type="checkbox" />
+          <span>Remember this layout and the view sizes in a cookie</span>
+        </label>
+        <p class="hint">Leave this off and the arrangement and the dragged heights last until you reload the page. On a narrow window the views stack in this order.</p>
+      </div>
+    </div>
     <p class="lede">Parametric insert for 3D print (STL) and laser cut (SVG / DXF).</p>
   </header>
 
@@ -226,8 +271,9 @@
       <p id="status" class="status" role="status"></p>
     </section>
 
-    <div class="preview-column">
-      <section class="panel preview" aria-label="Plan view">
+    <div class="preview-wrap">
+    <div id="preview-column" class="preview-column" data-layout="stack">
+      <section class="panel preview" data-view="plan" data-slot="a" aria-label="Plan view">
         <h2 class="with-info">Plan
           <span class="info">
             <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-plan" aria-label="About the plan">i</button>
@@ -244,7 +290,7 @@
           <span>Snap to whole mm</span>
         </label>
       </section>
-      <section class="panel preview" aria-label="3D preview">
+      <section class="panel preview" data-view="view3d" data-slot="b" aria-label="3D preview">
         <h2 class="with-info">3D preview
           <span class="info">
             <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-view3d" aria-label="About the 3D preview">i</button>
@@ -254,7 +300,7 @@
         <canvas id="view3d" width="800" height="500"></canvas>
         <div id="view3d-resize" class="preview-resize" role="separator" aria-orientation="horizontal" aria-label="Resize 3D preview height" tabindex="0"></div>
       </section>
-      <section class="panel preview" aria-label="2D drawing">
+      <section class="panel preview" data-view="drawing" data-slot="c" aria-label="2D drawing">
         <div class="preview-head">
           <h2 class="with-info">2D drawing
             <span class="info">
@@ -269,12 +315,13 @@
         <p class="hint" id="dims"></p>
       </section>
     </div>
+    </div>
   </main>
 
   <footer>
     <p><a href="https://github.com/kevinpetursson/LaserBox">Source code</a> · <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a></p>
   </footer>
 
-  <script src="/static/app.js?v=plan-name3"></script>
+  <script src="/static/app.js?v=layout-heights"></script>
 </body>
 </html>
