@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Box Inserts — prototype</title>
+  <link rel="stylesheet" href="/static/style.css?v=source-footer" />
+</head>
+<body>
+  <header>
+    <h1>Box Inserts</h1>
+    <p class="lede">Parametric insert for 3D print (STL) and laser cut (SVG / DXF).</p>
+  </header>
+
+  <main>
+    <section class="panel" aria-label="Parameters">
+      <h2>Box &amp; material</h2>
+      <div class="dim-mode" role="group" aria-label="Length and width measurement">
+        <span class="dim-mode-label">Length &amp; width</span>
+        <div class="seg">
+          <button type="button" id="dim-inside" aria-pressed="true">Inside</button>
+          <button type="button" id="dim-outside" aria-pressed="false">Outside</button>
+        </div>
+        <span class="info">
+          <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-dim-mode" aria-label="About inside and outside dimensions">i</button>
+          <span id="tip-dim-mode" class="tip" role="tooltip" hidden>Inside is measured between the inner faces. Outside is the overall size. Length and width differ by twice the material thickness. With a floor, height differs by one thickness. Lid side height differs by the panel thickness. Flipping this rewrites those numbers so the box stays the same size.</span>
+        </span>
+      </div>
+      <div class="grid">
+        <label>
+          <span class="field-name"><span id="length-label">Length ID (mm)</span>
+            <span class="info">
+              <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-length" aria-label="About length">i</button>
+              <span id="tip-length" class="tip" role="tooltip" hidden>Inside length, measured between the inner faces of the walls. The outside length is this plus twice the material thickness.</span>
+            </span>
+          </span>
+          <input id="length" type="number" step="0.1" min="20" />
+        </label>
+        <label>
+          <span class="field-name"><span id="width-label">Width ID (mm)</span>
+            <span class="info">
+              <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-width" aria-label="About width">i</button>
+              <span id="tip-width" class="tip" role="tooltip" hidden>Inside width, measured between the inner faces of the walls. The outside width is this plus twice the material thickness.</span>
+            </span>
+          </span>
+          <input id="width" type="number" step="0.1" min="20" />
+        </label>
+        <label>
+          <span class="field-name"><span id="height-label">Height ID (mm)</span>
+            <span class="info">
+              <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-height" aria-label="About height">i</button>
+              <span id="tip-height" class="tip" role="tooltip" hidden>Inside height, from the top of the floor to the top of the walls. The outside height is this plus the material thickness. With no floor, inside and outside height are the same.</span>
+            </span>
+          </span>
+          <input id="height" type="number" step="0.1" min="10" />
+        </label>
+        <label>
+          <span class="field-name">Thickness (mm)
+            <span class="info">
+              <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-thickness" aria-label="About thickness">i</button>
+              <span id="tip-thickness" class="tip" role="tooltip" hidden>Thickness of the walls, floor, and dividers. For laser cutting this is the sheet thickness, from 3 to 6 mm. It also sets the width of the divider slots.</span>
+            </span>
+          </span>
+          <input id="thickness" type="number" step="0.5" min="3" max="6" />
+        </label>
+        <label>
+          <span class="field-name">Kerf (mm)
+            <span class="info">
+              <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-kerf" aria-label="About kerf">i</button>
+              <span id="tip-kerf" class="tip" role="tooltip" hidden>Width of material the laser burns away. Outlines are offset by half of this so the finished pieces match the size, and slots are opened so dividers still fit. Use 0 if your laser software already compensates.</span>
+            </span>
+          </span>
+          <input id="kerf" type="number" step="0.01" min="0" />
+        </label>
+        <label>
+          <span class="field-name">Finger count
+            <span class="info">
+              <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-fingers" aria-label="About finger count">i</button>
+              <span id="tip-fingers" class="tip" role="tooltip" hidden>How many finger joints run along each vertical corner of the laser-cut walls. The floor edges, the lid panel, and the divider joints use that same spacing. An even count is raised to the next odd number so both ends of the joint match. A lid side that is too short for that many fingers meets the next side at the middle of the edge instead. This affects SVG and DXF only, not the STL.</span>
+            </span>
+          </span>
+          <input id="finger_count" type="number" step="1" min="3" max="15" />
+        </label>
+      </div>
+      <div class="checks">
+        <label class="check">
+          <input id="floor" type="checkbox" />
+          <span>Floor (print default)</span>
+          <span class="info">
+            <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-floor" aria-label="About floor">i</button>
+            <span id="tip-floor" class="tip" role="tooltip" hidden>Include a floor. The STL gets a solid base. The laser file gets a floor panel that finger-joints into the walls, with slots where the dividers pass through. Turn this off for walls and dividers only.</span>
+          </span>
+        </label>
+      </div>
+      <div class="lid-options">
+        <div class="dim-mode">
+          <span class="dim-mode-label" id="lid-label">Lid</span>
+          <span class="info">
+            <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-lid" aria-label="About the lid">i</button>
+            <span id="tip-lid" class="tip" role="tooltip" hidden>Cap with a lip is a shallow box turned over the outside of this box, with a small gap so it can slip on. Sit on top is the same size as the box. Its rim hangs down onto the walls, so the open side faces into the box and the panel closes the top. The joint between the lid panel and the sides is the same size as the floor joint. Where the lid sides meet, the fingers match the box corners. If the side is too short for that, the two sides meet once, halfway along the edge. The fingered edge of each side joins the lid panel, and the straight edge is the open edge. Side height follows Inside/Outside. Inside is the depth of the opening, up to the underside of the panel, and it must be at least the material thickness. Outside includes the panel and must be at least twice the material thickness. Tab and slot raises the two side walls and the back wall by twice the material thickness. The lid is one sheet, about the size of the floor. Its front extends by one thickness, flush with the outside of the box, and its back edge is straight. Each side has two or three tabs. Drop the tabs into the open tops of the side slots, then slide the lid back by the tab length. The open top is 1.1 times the tab length. The front half of the closed slot is slightly wider, and the back half stays at the material thickness so it holds by friction. The opening sits back from the front of the box. A finger hole is centered across the lid, in line with the front tab. It is 20 mm across, with a 14 mm flat on the front. Slides toward chooses which wall is that back. The STL shows the lid as a solid, without the finger cutouts or the slide slots. Alignment tabs are only for the sit-on-top lid. Pick any corners. Each chosen corner gets an L of two strips. Glue the top of each strip to the underside of the lid panel. The strip fills the lid and continues down into the box, so it connects the two. Inside places the L in the corner. Outside wraps the L around the corner. A divider that reaches an inside corner will meet that tab. Tab height is how far the strips drop into the box, and it must be at least the material thickness. Latch raises every wall by twice the material thickness. The lid is one sheet. Two plain tabs on the back edge sit in the back wall. The front of that same sheet has one or two spring tabs, and each one sticks into a slot in the front wall. The serpentine cut is in the lid, just behind the tab. A finger hole in the tab lets you pull it toward the middle of the box, out of the slot, so the lid can come off. Loops is how many times that spring folds. Beam is the wood left between the cuts. Width is how wide one spring is. Two front tabs places a pair of them instead of one in the center.</span>
+          </span>
+          <div class="seg" role="group" aria-labelledby="lid-label">
+            <button type="button" id="lid-none" aria-pressed="true">None</button>
+            <button type="button" id="lid-cap" aria-pressed="false">Cap with a lip</button>
+            <button type="button" id="lid-top" aria-pressed="false">Sit on top</button>
+            <button type="button" id="lid-slide" aria-pressed="false">Tab &amp; slot</button>
+            <button type="button" id="lid-latch" aria-pressed="false">Latch</button>
+          </div>
+        </div>
+        <div class="grid" id="lid-height-row" hidden>
+          <label>
+            <span class="field-name" id="side-height-label">Side height ID (mm)</span>
+            <input id="lid-height" type="number" step="0.1" min="3" max="80" value="15" />
+          </label>
+        </div>
+        <div id="lid-tab-row" hidden>
+          <label class="check">
+            <input id="lid-tabs-on" type="checkbox" />
+            <span>Alignment tabs</span>
+          </label>
+          <div class="grid" id="lid-tab-fields" hidden>
+            <label>
+              <span class="field-name">Tab height (mm)</span>
+              <input id="lid-tab-height" type="number" step="0.1" min="3" max="40" value="12" />
+            </label>
+            <div class="dim-mode">
+              <span class="dim-mode-label" id="tab-fit-label">Tab fit</span>
+              <div class="seg" role="group" aria-labelledby="tab-fit-label">
+                <button type="button" id="tab-inner" aria-pressed="true">Inside</button>
+                <button type="button" id="tab-outer" aria-pressed="false">Outside</button>
+              </div>
+            </div>
+            <div class="lid-corners" id="lid-tab-corners">
+              <label class="check"><input type="checkbox" data-corner="front-left" checked /> Front left</label>
+              <label class="check"><input type="checkbox" data-corner="front-right" /> Front right</label>
+              <label class="check"><input type="checkbox" data-corner="back-left" /> Back left</label>
+              <label class="check"><input type="checkbox" data-corner="back-right" checked /> Back right</label>
+            </div>
+          </div>
+        </div>
+        <div id="lid-slide-row" hidden>
+          <div class="dim-mode">
+            <span class="dim-mode-label" id="slide-dir-label">Slides toward</span>
+            <div class="seg" role="group" aria-labelledby="slide-dir-label">
+              <button type="button" id="slide-back" aria-pressed="true">Back</button>
+              <button type="button" id="slide-front" aria-pressed="false">Front</button>
+              <button type="button" id="slide-left" aria-pressed="false">Left</button>
+              <button type="button" id="slide-right" aria-pressed="false">Right</button>
+            </div>
+          </div>
+          <div class="grid">
+            <div class="dim-mode">
+              <span class="dim-mode-label" id="slide-count-label">Side tabs</span>
+              <div class="seg" role="group" aria-labelledby="slide-count-label">
+                <button type="button" id="slide-tabs-2" aria-pressed="true">2</button>
+                <button type="button" id="slide-tabs-3" aria-pressed="false">3</button>
+              </div>
+            </div>
+            <label>
+              <span class="field-name">Tab length (mm)</span>
+              <input id="lid-slide-tab" type="number" step="0.1" min="6" max="80" value="20" />
+            </label>
+          </div>
+        </div>
+        <div id="lid-latch-row" hidden>
+          <div class="grid">
+            <div class="dim-mode">
+              <span class="dim-mode-label" id="latch-count-label">Front tabs</span>
+              <div class="seg" role="group" aria-labelledby="latch-count-label">
+                <button type="button" id="latch-tabs-1" aria-pressed="true">1</button>
+                <button type="button" id="latch-tabs-2" aria-pressed="false">2</button>
+              </div>
+            </div>
+            <label>
+              <span class="field-name">Loops</span>
+              <input id="lid-latch-loops" type="number" step="1" min="2" max="8" value="4" />
+            </label>
+            <label>
+              <span class="field-name">Beam (mm)</span>
+              <input id="lid-latch-beam" type="number" step="0.1" min="1" max="4" value="2" />
+            </label>
+            <label>
+              <span class="field-name">Width (mm)</span>
+              <input id="lid-latch-width" type="number" step="0.1" min="14" max="80" value="30" />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <h2 class="with-info">Dividers
+        <span class="info">
+          <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-dividers" aria-label="About divider measurements">i</button>
+          <span id="tip-dividers" class="tip" role="tooltip" hidden>Dividers are always measured from the inside faces of the box. Name is written on that divider in the 2D drawing. X is the distance from the left inside wall and Y from the front inside wall, in millimeters. These coordinates do not change when length and width switch between inside and outside. From floor is the gap above the floor, and from top is the gap below the top of the box. Either gap can be a distance in millimeters or a percentage of the box height; flipping the unit keeps the same gap. In millimetres, neither one can be more than the box height minus the material thickness. Zero reaches the floor. Finger joint to floor cuts fingers through the floor panel. Turn it off and the divider still sits on the floor, with a straight bottom and no slots in the floor. Tilt leans the divider away from straight up, in degrees. Zero stays perpendicular to the floor. Positive leans to the left as you look from the first point toward the second. A tilted divider is cut longer so it still reaches the same height. Finger joints into the floor and into a square wall stay fingers and follow the lean. A divider that ends squarely on a tilted divider is cut on an angle, and its fingers are perpendicular to that tilted face. A meeting that is slanted in the plan keeps one slot.  Two dividers that cross use an overlap joint over the height they share: the one listed first is slotted up from the bottom, and the other is slotted down from the top. A divider that ends on another divider's centerline is finger-jointed into it, the same way it meets an outer wall. Two dividers that end on the same point from opposite sides share those slots, and each tab stops halfway through.</span>
+        </span>
+      </h2>
+      <p class="hint">Centerlines in millimeters from the inside faces of the box. Name is written on that divider in the 2D drawing. From floor and from top shorten a divider. In millimetres, neither can be more than the box height minus the material thickness. Tilt leans it off vertical. The plan draws the bottom face. A tilted divider shows a dashed line where its top leans, and a divider that ends on it shows a dashed top that runs long or short to meet that line. Uncheck Finger joint to floor to rest a full-height divider on the floor without cutting slots in it.</p>
+      <div id="dividers"></div>
+      <button type="button" id="add-divider" class="secondary">Add divider</button>
+
+      <h2>Saved design</h2>
+      <p class="hint">Download this box to a file on your computer. Upload that file later to replace the settings on screen, including the lid and the dividers.</p>
+      <div class="actions">
+        <button type="button" id="design-download">Download design</button>
+        <button type="button" id="design-upload">Upload design</button>
+        <input id="design-file" type="file" accept=".json,application/json" hidden />
+      </div>
+      <ul id="design-errors" class="design-errors" hidden></ul>
+      <pre id="design-json" class="json-fault" hidden></pre>
+
+      <h2>Export</h2>
+      <div class="actions">
+        <button type="button" data-export="stl">Download STL</button>
+        <button type="button" data-export="svg">Download SVG</button>
+        <button type="button" data-export="dxf">Download DXF</button>
+      </div>
+      <p id="status" class="status" role="status"></p>
+    </section>
+
+    <div class="preview-column">
+      <section class="panel preview" aria-label="Plan view">
+        <h2>Plan</h2>
+        <canvas id="plan" width="800" height="500"></canvas>
+        <label class="check plan-snap" title="A dragged face or end lands on a whole millimetre. A wall or another divider still wins when the pointer is close.">
+          <input id="snap-mm" type="checkbox" checked />
+          <span>Snap to whole mm</span>
+        </label>
+        <p class="hint">This view shows only the bottom face of each divider. Click a divider to select it. Drag that face sideways. A divider that ends on it stretches so the joint stays put. Drag an end to change its length. The angle stays as it is. Snap to whole mm keeps that drag on a whole millimetre, unless it is close to a wall or another divider. A tilted divider shows a dashed line where its top leans. A divider that ends on it shows a dashed top, longer or shorter, so the joint meets that line. Dragging still moves the bottom face. Looking down on the top, with the front edge at the bottom.</p>
+      </section>
+      <section class="panel preview" aria-label="3D preview">
+        <h2>3D preview</h2>
+        <canvas id="view3d" width="800" height="500"></canvas>
+        <div id="view3d-resize" class="preview-resize" role="separator" aria-orientation="horizontal" aria-label="Resize 3D preview height" tabindex="0"></div>
+        <p class="hint">Drag to rotate. Scroll to zoom. Drag the bar to make this view shorter or taller. This is the printed insert. A lid, when selected, sits on the box. The lid is drawn in a warmer color.</p>
+      </section>
+      <section class="panel preview" aria-label="2D drawing">
+        <h2>2D drawing</h2>
+        <canvas id="drawing" width="800" height="500"></canvas>
+        <p class="hint" id="dims"></p>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <p><a href="https://github.com/kevinpetursson/LaserBox">Source code</a> · <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a></p>
+  </footer>
+
+  <script src="/static/app.js?v=lid-latch"></script>
+</body>
+</html>
