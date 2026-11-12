@@ -2005,11 +2005,11 @@ function uploadDesign(file) {
   reader.readAsText(file);
 }
 
-async function doExport(fmt) {
+async function downloadFile(url, filename, busy, done) {
   const status = el("status");
-  status.textContent = `Building ${fmt.toUpperCase()}…`;
+  status.textContent = busy;
   try {
-    const res = await fetch(`/api/export/${fmt}`, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(readParams()),
@@ -2018,13 +2018,22 @@ async function doExport(fmt) {
     const blob = await res.blob();
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `insert.${fmt}`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(a.href);
-    status.textContent = `Downloaded insert.${fmt}`;
+    status.textContent = done;
   } catch (err) {
     status.textContent = `Export failed: ${err.message || err}`;
   }
+}
+
+async function doExport(fmt) {
+  return downloadFile(
+    `/api/export/${fmt}`,
+    `insert.${fmt}`,
+    `Building ${fmt.toUpperCase()}…`,
+    `Downloaded insert.${fmt}`
+  );
 }
 
 el("dim-inside").addEventListener("click", () => setDimMode("inside"));
@@ -2170,6 +2179,17 @@ el("tab-outer").addEventListener("click", () => { tabFit = "outer"; syncLidField
 el("lid-tab-corners").addEventListener("change", draw);
 document.querySelectorAll("[data-export]").forEach((btn) => {
   btn.addEventListener("click", () => doExport(btn.dataset.export));
+});
+document.querySelectorAll("[data-kerf-test]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const fmt = btn.dataset.kerfTest;
+    downloadFile(
+      `/api/kerf-test/${fmt}`,
+      `kerf-test.${fmt}`,
+      "Building kerf test…",
+      `Downloaded kerf-test.${fmt}. NOW is the kerf typed above.`
+    );
+  });
 });
 el("design-download").addEventListener("click", downloadDesign);
 el("design-upload").addEventListener("click", () => el("design-file").click());

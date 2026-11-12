@@ -30,28 +30,153 @@ def _rect(x: float, y: float, w: float, h: float) -> Poly:
     return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
 
 
-def _offset_kerf(poly: Poly, kerf: float, outward: bool = True) -> Poly:
-    """Uniform outward/inward offset for axis-aligned / near-rect polygons via vertex nudge.
+def _drop_collinear(poly: Poly, tol: float = 1e-8) -> Poly:
+    """Drop repeated and in-line points so each remaining corner actually turns."""
+    pts: Poly = []
+    for point in poly:
+        if not pts or abs(point[0] - pts[-1][0]) > 1e-9 or abs(point[1] - pts[-1][1]) > 1e-9:
+            pts.append(point)
+    if (
+        len(pts) > 1
+        and abs(pts[0][0] - pts[-1][0]) < 1e-9
+        and abs(pts[0][1] - pts[-1][1]) < 1e-9
+    ):
+        pts.pop()
+    guard = 0
+    while len(pts) > 3 and guard < 8:
+        guard += 1
+        kept: Poly = []
+        removed = False
+        count = len(pts)
+        for index in range(count):
+            ax, ay = pts[(index - 1) % count]
+            bx, by = pts[index]
+            cx, cy = pts[(index + 1) % count]
+            cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+            if abs(cross) <= tol:
+                removed = True
+                continue
+            kept.append(pts[index])
+        pts = kept
+        if not removed:
+            break
+    return pts
 
-    For MVP, kerf is applied as a simple expansion of the bounding box for outer cuts
-    and shrinkage for holes — good enough for rectangular finger-joint panels.
+
+def _is_orthogonal(poly: Poly, tol: float = 1e-6) -> bool:
+    count = len(poly)
+    if count < 3:
+        return False
+    for index in range(count):
+        x0, y0 = poly[index]
+        x1, y1 = poly[(index + 1) % count]
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        if dx > tol and dy > tol:
+            return False
+    return True
+
+
+def _segments_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool:
+    """True when the open segments AB and CD cross."""
+
+    def cross(p: Vec2, q: Vec2, r: Vec2) -> float:
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    d1 = cross(a, b, c)
+    d2 = cross(a, b, d)
+    d3 = cross(c, d, a)
+    d4 = cross(c, d, b)
+    if abs(d1) < 1e-8 or abs(d2) < 1e-8 or abs(d3) < 1e-8 or abs(d4) < 1e-8:
+        return False
+    return (d1 > 0) != (d2 > 0) and (d3 > 0) != (d4 > 0)
+
+
+def _self_intersects(poly: Poly) -> bool:
+    count = len(poly)
+    for i in range(count):
+        a, b = poly[i], poly[(i + 1) % count]
+        for j in range(i + 1, count):
+            if j <= i + 1 or (i == 0 and j == count - 1):
+                continue
+            c, d = poly[j], poly[(j + 1) % count]
+            if _segments_cross(a, b, c, d):
+                return True
+    return False
+
+
+def _offset_orthogonal(poly: Poly, dist: float) -> Poly | None:
+    """Move each axis-aligned edge by `dist` along its outward normal.
+
+    Positive `dist` grows the part. A positive area is counter-clockwise.
     """
-    if kerf <= 0 or len(poly) < 3:
-        return list(poly)
+    pts = _drop_collinear(poly)
+    if len(pts) < 3:
+        return None
+    area = _shoelace(pts)
+    if abs(area) < 1e-6:
+        return None
+    winding = 1.0 if area > 0 else -1.0
+    count = len(pts)
+    lines: List[Tuple[str, float]] = []
+    for index in range(count):
+        x0, y0 = pts[index]
+        x1, y1 = pts[(index + 1) % count]
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            return None
+        ox = winding * dy / length
+        oy = winding * -dx / length
+        if abs(dy) <= abs(dx):
+            lines.append(("h", y0 + oy * dist))
+        else:
+            lines.append(("v", x0 + ox * dist))
+    out: Poly = []
+    for index in range(count):
+        previous = lines[(index - 1) % count]
+        current = lines[index]
+        if previous[0] == current[0]:
+            return None
+        if previous[0] == "v":
+            out.append((previous[1], current[1]))
+        else:
+            out.append((current[1], previous[1]))
+    if _self_intersects(out) or abs(_shoelace(out)) < 1.0:
+        return None
+    return out
+
+
+def _offset_bbox(poly: Poly, kerf: float, outward: bool) -> Poly:
+    """Expand or shrink by the bounding-box center. Used when an edge is diagonal."""
     xs = [p[0] for p in poly]
     ys = [p[1] for p in poly]
     cx = (min(xs) + max(xs)) / 2.0
     cy = (min(ys) + max(ys)) / 2.0
-    sign = 1.0 if outward else -1.0
-    half = kerf / 2.0 * sign
+    half = kerf / 2.0 * (1.0 if outward else -1.0)
     out: Poly = []
     for x, y in poly:
         dx = half if x >= cx else -half
         dy = half if y >= cy else -half
-        # Corner vertices get both axes; edge-midpoints would need different handling.
-        # For rect-like polys this expands/shrinks correctly.
         out.append((x + dx, y + dy))
     return out
+
+
+def _offset_kerf(poly: Poly, kerf: float, outward: bool = True) -> Poly:
+    """Grow or shrink a cut path by half the kerf.
+
+    Axis-aligned outlines, including finger joints, are offset edge by edge so a
+    tab grows by the kerf and the gap it fits into shrinks by the kerf. A diagonal
+    edge keeps the older bounding-box expansion.
+    """
+    if kerf <= 0 or len(poly) < 3:
+        return list(poly)
+    dist = kerf / 2.0 if outward else -kerf / 2.0
+    cleaned = _drop_collinear(poly)
+    if len(cleaned) >= 3 and _is_orthogonal(cleaned):
+        shifted = _offset_orthogonal(cleaned, dist)
+        if shifted:
+            return shifted
+    return _offset_bbox(poly, kerf, outward)
 
 
 def _finger_edge(
@@ -1346,6 +1471,488 @@ def _divider_outline(
     return outline
 
 
+def _axis_rect(poly: Poly) -> Tuple[float, float, float, float] | None:
+    """Bounding box of an axis-aligned rectangle, or None."""
+    pts: Poly = []
+    for x, y in poly:
+        if pts and abs(x - pts[-1][0]) <= 1e-6 and abs(y - pts[-1][1]) <= 1e-6:
+            continue
+        pts.append((x, y))
+    if len(pts) >= 2 and abs(pts[0][0] - pts[-1][0]) <= 1e-6 and abs(pts[0][1] - pts[-1][1]) <= 1e-6:
+        pts = pts[:-1]
+    if len(pts) != 4:
+        return None
+    for i in range(4):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % 4]
+        if abs(ax - bx) > 1e-6 and abs(ay - by) > 1e-6:
+            return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    if x1 - x0 < 0.2 or y1 - y0 < 0.2:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def _shoelace(poly: Poly) -> float:
+    area = 0.0
+    n = len(poly)
+    for i in range(n):
+        x0, y0 = poly[i]
+        x1, y1 = poly[(i + 1) % n]
+        area += x0 * y1 - x1 * y0
+    return area / 2.0
+
+
+def _on_segment(x: float, y: float, a: Vec2, b: Vec2, eps: float = 1e-6) -> bool:
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    span = math.hypot(dx, dy)
+    if span < 1e-12:
+        return math.hypot(x - ax, y - ay) <= eps
+    if abs((x - ax) * dy - (y - ay) * dx) > eps * span:
+        return False
+    dot = (x - ax) * dx + (y - ay) * dy
+    return -eps * span <= dot <= span * span + eps * span
+
+
+def _strictly_inside(x: float, y: float, poly: Poly) -> bool:
+    """True when (x, y) is in the interior. Boundary points are outside."""
+    pts = list(poly)
+    if len(pts) >= 2 and abs(pts[0][0] - pts[-1][0]) <= 1e-9 and abs(pts[0][1] - pts[-1][1]) <= 1e-9:
+        pts = pts[:-1]
+    if len(pts) < 3:
+        return False
+    n = len(pts)
+    for i in range(n):
+        if _on_segment(x, y, pts[i], pts[(i + 1) % n]):
+            return False
+    return _point_in_poly(x, y, pts)
+
+
+def _open_slots_into_outline(
+    outline: Poly, holes: List[Poly], kerf: float
+) -> Tuple[Poly, List[Poly]]:
+    """Join holes that meet the outline so they become one opening.
+
+    A finger that starts on an edge notch, or a tab slot that runs out through
+    an edge, shares that line with the outline. Drawn as its own path, the laser
+    traces the shared line and the slot stays a separate cut. The slot is cut
+    out of the outline instead. Holes that do not reach an edge stay holes.
+    """
+    tol = max(kerf * 0.5 + 0.05, 0.05)
+    current = list(outline)
+    kept: List[Poly] = []
+    for hole in holes:
+        rect = _axis_rect(hole)
+        opened = (
+            _cut_rect_from_outline(current, rect, tol)
+            if rect is not None
+            else _cut_poly_from_outline(current, hole)
+        )
+        if opened is None:
+            kept.append(hole)
+        else:
+            current = opened
+    return current, kept
+
+
+def _cut_rect_from_outline(
+    outline: Poly, rect: Tuple[float, float, float, float], tol: float
+) -> Poly | None:
+    """Return the outline with `rect` opened through any edge it touches."""
+    outline = _as_ccw(outline)
+    x0, y0, x1, y1 = rect
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    if not _point_in_poly(cx, cy, outline):
+        return None
+    grown = _grow_rect_to_edges(rect, outline, tol)
+    if grown == rect and not _rect_crosses_outline(rect, outline):
+        return None
+    segments = _outline_minus_rect(outline, grown)
+    if not segments:
+        return None
+    loops = _stitch_loops(segments)
+    if len(loops) != 1:
+        return None
+    loop = loops[0]
+    if _shoelace(loop) < 0.0:
+        loop = list(reversed(loop))
+    old_area = abs(_shoelace(outline))
+    new_area = abs(_shoelace(loop))
+    if not (old_area * 0.5 < new_area < old_area - 0.5):
+        return None
+    if _strictly_inside(cx, cy, loop):
+        return None
+    return loop
+
+
+def _as_ccw(poly: Poly) -> Poly:
+    pts = _ring(poly)
+    if len(pts) >= 3 and _shoelace(pts) < 0.0:
+        pts = list(reversed(pts))
+    return pts
+
+
+def _cut_poly_from_outline(outline: Poly, hole: Poly) -> Poly | None:
+    """Open a non-rectangular hole that crosses the outline, such as a slide slot."""
+    outline = _as_ccw(outline)
+    ccw = _as_ccw(hole)
+    if len(ccw) < 3 or not _poly_hits_outline(ccw, outline):
+        return None
+    sample = _interior_sample(ccw, outline)
+    if sample is None:
+        return None
+    segments = _outline_minus_poly(outline, ccw)
+    if not segments:
+        return None
+    loops = _stitch_loops(segments)
+    if len(loops) != 1:
+        return None
+    loop = loops[0]
+    if _shoelace(loop) < 0.0:
+        loop = list(reversed(loop))
+    old_area = abs(_shoelace(outline))
+    new_area = abs(_shoelace(loop))
+    if not (old_area * 0.5 < new_area < old_area - 0.5):
+        return None
+    if _strictly_inside(sample[0], sample[1], loop):
+        return None
+    return loop
+
+
+def _poly_hits_outline(hole: Poly, outline: Poly) -> bool:
+    other = _ring(outline)
+    n = len(other)
+    if n < 3:
+        return False
+    pts = _ring(hole)
+    for i in range(len(pts)):
+        a, b = pts[i], pts[(i + 1) % len(pts)]
+        for j in range(n):
+            if _segment_t(a, b, other[j], other[(j + 1) % n]) is not None:
+                return True
+    return False
+
+
+def _interior_sample(hole: Poly, outline: Poly) -> Vec2 | None:
+    """A point that is inside both the hole and the outline."""
+    pts = _ring(hole)
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
+    if _strictly_inside(cx, cy, hole) and _strictly_inside(cx, cy, outline):
+        return (cx, cy)
+    for i in range(len(pts)):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % len(pts)]
+        mx = (ax + bx) / 2.0 * 0.65 + cx * 0.35
+        my = (ay + by) / 2.0 * 0.65 + cy * 0.35
+        if _strictly_inside(mx, my, hole) and _strictly_inside(mx, my, outline):
+            return (mx, my)
+    return None
+
+
+def _outline_minus_poly(outline: Poly, hole: Poly) -> List[Tuple[Vec2, Vec2]]:
+    """Directed edges of (inside outline) minus (inside hole). `hole` is counterclockwise."""
+    segments: List[Tuple[Vec2, Vec2]] = []
+    pts = _ring(outline)
+    n = len(pts)
+    for i in range(n):
+        segments.extend(_outside_poly(pts[i], pts[(i + 1) % n], hole))
+    # Clockwise, so the left side is outside the hole.
+    m = len(hole)
+    for i in range(m):
+        segments.extend(_inside_outline(hole[(i + 1) % m], hole[i], outline))
+    return segments
+
+
+def _outside_poly(a: Vec2, b: Vec2, hole: Poly) -> List[Tuple[Vec2, Vec2]]:
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    ts = [0.0, 1.0]
+    hpts = _ring(hole)
+    m = len(hpts)
+    for i in range(m):
+        hit = _segment_t(a, b, hpts[i], hpts[(i + 1) % m])
+        if hit is not None:
+            ts.append(hit)
+    kept: List[Tuple[Vec2, Vec2]] = []
+    ordered = sorted(set(round(t, 8) for t in ts))
+    for t0, t1 in zip(ordered, ordered[1:]):
+        if t1 - t0 < 1e-8:
+            continue
+        tm = (t0 + t1) / 2.0
+        mx, my = ax + dx * tm, ay + dy * tm
+        if _covered_by_hole(mx, my, dx, dy, hole):
+            continue
+        kept.append(((ax + dx * t0, ay + dy * t0), (ax + dx * t1, ay + dy * t1)))
+    return kept
+
+
+def _covered_by_hole(x: float, y: float, dx: float, dy: float, hole: Poly) -> bool:
+    if _strictly_inside(x, y, hole):
+        return True
+    pts = _ring(hole)
+    if not any(_on_segment(x, y, pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))):
+        return False
+    span = math.hypot(dx, dy) or 1.0
+    # The hole claims the edge only when its interior is on the material side.
+    return _point_in_poly(x - dy / span * 0.04, y + dx / span * 0.04, hole)
+
+
+def _grow_rect_to_edges(
+    rect: Tuple[float, float, float, float], outline: Poly, tol: float
+) -> Tuple[float, float, float, float]:
+    """Push each side that sits on an outline edge just past that edge.
+
+    Kerf leaves the slot a fraction of a millimetre short of the notch, so the
+    two cuts do not quite meet. Growing across that gap lets them become one
+    opening without moving the other three sides.
+    """
+    x0, y0, x1, y1 = rect
+    rcx, rcy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    nx0, ny0, nx1, ny1 = x0, y0, x1, y1
+    pts = _ring(outline)
+    n = len(pts)
+    for i in range(n):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        if math.hypot(dx, dy) < 1e-9:
+            continue
+        # The slot has to sit in the material, on the left of the outline edge.
+        if dx * (rcy - ay) - dy * (rcx - ax) <= 1e-6:
+            continue
+        if abs(dy) <= 1e-7:
+            ex0, ex1 = (ax, bx) if ax <= bx else (bx, ax)
+            if min(x1, ex1) - max(x0, ex0) < 0.3:
+                continue
+            y = ay
+            if abs(y - y0) <= tol:
+                ny0 = min(ny0, y - 0.02)
+            elif abs(y - y1) <= tol:
+                ny1 = max(ny1, y + 0.02)
+        elif abs(dx) <= 1e-7:
+            ey0, ey1 = (ay, by) if ay <= by else (by, ay)
+            if min(y1, ey1) - max(y0, ey0) < 0.3:
+                continue
+            x = ax
+            if abs(x - x0) <= tol:
+                nx0 = min(nx0, x - 0.02)
+            elif abs(x - x1) <= tol:
+                nx1 = max(nx1, x + 0.02)
+    if nx1 - nx0 < 0.2 or ny1 - ny0 < 0.2:
+        return rect
+    return (nx0, ny0, nx1, ny1)
+
+
+def _ring(poly: Poly) -> Poly:
+    pts = list(poly)
+    if len(pts) >= 2 and abs(pts[0][0] - pts[-1][0]) <= 1e-9 and abs(pts[0][1] - pts[-1][1]) <= 1e-9:
+        pts = pts[:-1]
+    return pts
+
+
+def _rect_crosses_outline(rect: Tuple[float, float, float, float], outline: Poly) -> bool:
+    x0, y0, x1, y1 = rect
+    pts = _ring(outline)
+    n = len(pts)
+    for i in range(n):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % n]
+        if _segment_hits_rect(ax, ay, bx, by, x0, y0, x1, y1):
+            return True
+    return False
+
+
+def _segment_hits_rect(
+    ax: float, ay: float, bx: float, by: float,
+    x0: float, y0: float, x1: float, y1: float,
+) -> bool:
+    if (x0 <= ax <= x1 and y0 <= ay <= y1) or (x0 <= bx <= x1 and y0 <= by <= y1):
+        return True
+    ts = _rect_split_ts(ax, ay, bx, by, (x0, y0, x1, y1))
+    return any(1e-6 < t < 1.0 - 1e-6 for t in ts)
+
+
+def _rect_split_ts(
+    ax: float, ay: float, bx: float, by: float, rect: Tuple[float, float, float, float]
+) -> List[float]:
+    dx, dy = bx - ax, by - ay
+    x0, y0, x1, y1 = rect
+    ts = [0.0, 1.0]
+    for val, origin, delta, lo, hi, horizontal in (
+        (x0, ax, dx, y0, y1, False),
+        (x1, ax, dx, y0, y1, False),
+        (y0, ay, dy, x0, x1, True),
+        (y1, ay, dy, x0, x1, True),
+    ):
+        if abs(delta) < 1e-12:
+            continue
+        t = (val - origin) / delta
+        if t < -1e-8 or t > 1.0 + 1e-8:
+            continue
+        if horizontal:
+            cross = ax + dx * t
+        else:
+            cross = ay + dy * t
+        if lo - 1e-6 <= cross <= hi + 1e-6:
+            ts.append(min(1.0, max(0.0, t)))
+    return ts
+
+
+def _outline_minus_rect(
+    outline: Poly, rect: Tuple[float, float, float, float]
+) -> List[Tuple[Vec2, Vec2]]:
+    """Directed edges of (inside outline) minus (inside rect). Interior stays on the left."""
+    x0, y0, x1, y1 = rect
+    segments: List[Tuple[Vec2, Vec2]] = []
+    pts = _ring(outline)
+    n = len(pts)
+    for i in range(n):
+        segments.extend(_outside_rect(pts[i], pts[(i + 1) % n], rect))
+    # Rectangle walked clockwise, so the left side is outside the hole.
+    rect_edges = (
+        ((x0, y0), (x0, y1)),
+        ((x0, y1), (x1, y1)),
+        ((x1, y1), (x1, y0)),
+        ((x1, y0), (x0, y0)),
+    )
+    for a, b in rect_edges:
+        segments.extend(_inside_outline(a, b, outline))
+    return segments
+
+
+def _outside_rect(
+    a: Vec2, b: Vec2, rect: Tuple[float, float, float, float]
+) -> List[Tuple[Vec2, Vec2]]:
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    ts = _rect_split_ts(ax, ay, bx, by, rect)
+    kept: List[Tuple[Vec2, Vec2]] = []
+    ordered = sorted(set(ts))
+    rx0, ry0, rx1, ry1 = rect
+    rcx, rcy = (rx0 + rx1) / 2.0, (ry0 + ry1) / 2.0
+    for t0, t1 in zip(ordered, ordered[1:]):
+        if t1 - t0 < 1e-8:
+            continue
+        tm = (t0 + t1) / 2.0
+        mx, my = ax + dx * tm, ay + dy * tm
+        inside = rx0 < mx < rx1 and ry0 < my < ry1
+        on_boundary = (
+            rx0 - 1e-6 <= mx <= rx1 + 1e-6
+            and ry0 - 1e-6 <= my <= ry1 + 1e-6
+            and (abs(mx - rx0) <= 1e-6 or abs(mx - rx1) <= 1e-6 or abs(my - ry0) <= 1e-6 or abs(my - ry1) <= 1e-6)
+        )
+        # A shared edge is the line the two cuts would trace twice. Drop it.
+        rect_on_left = dx * (rcy - ay) - dy * (rcx - ax) > 0.0
+        if inside or (on_boundary and rect_on_left):
+            continue
+        kept.append(((ax + dx * t0, ay + dy * t0), (ax + dx * t1, ay + dy * t1)))
+    return kept
+
+
+def _inside_outline(a: Vec2, b: Vec2, outline: Poly) -> List[Tuple[Vec2, Vec2]]:
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    ts = [0.0, 1.0]
+    pts = _ring(outline)
+    n = len(pts)
+    for i in range(n):
+        hit = _segment_t(a, b, pts[i], pts[(i + 1) % n])
+        if hit is not None:
+            ts.append(hit)
+    kept: List[Tuple[Vec2, Vec2]] = []
+    for t0, t1 in zip(sorted(set(ts)), sorted(set(ts))[1:]):
+        if t1 - t0 < 1e-8:
+            continue
+        tm = (t0 + t1) / 2.0
+        mx, my = ax + dx * tm, ay + dy * tm
+        if _strictly_inside(mx, my, outline):
+            kept.append(((ax + dx * t0, ay + dy * t0), (ax + dx * t1, ay + dy * t1)))
+    return kept
+
+
+def _segment_t(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> float | None:
+    ax, ay = a
+    bx, by = b
+    cx, cy = c
+    dx, dy = d
+    rx, ry = bx - ax, by - ay
+    sx, sy = dx - cx, dy - cy
+    den = rx * sy - ry * sx
+    if abs(den) < 1e-12:
+        return None
+    qpx, qpy = cx - ax, cy - ay
+    t = (qpx * sy - qpy * sx) / den
+    u = (qpx * ry - qpy * rx) / den
+    if -1e-8 <= t <= 1.0 + 1e-8 and -1e-8 <= u <= 1.0 + 1e-8:
+        return min(1.0, max(0.0, t))
+    return None
+
+
+def _snap_pt(p: Vec2) -> Vec2:
+    return (round(p[0], 5), round(p[1], 5))
+
+
+def _stitch_loops(segments: List[Tuple[Vec2, Vec2]]) -> List[Poly]:
+    """Walk directed edges into closed loops. At a junction, take the next left turn."""
+    outgoing: dict[Vec2, List[Vec2]] = {}
+    indeg: dict[Vec2, int] = {}
+    for a, b in segments:
+        a, b = _snap_pt(a), _snap_pt(b)
+        if abs(a[0] - b[0]) <= 1e-9 and abs(a[1] - b[1]) <= 1e-9:
+            continue
+        outgoing.setdefault(a, []).append(b)
+        indeg[b] = indeg.get(b, 0) + 1
+        indeg.setdefault(a, indeg.get(a, 0))
+    nodes = set(outgoing) | set(indeg)
+    for node in nodes:
+        if len(outgoing.get(node, [])) != indeg.get(node, 0):
+            return []
+    remaining = {node: list(dests) for node, dests in outgoing.items()}
+
+    def pick(prev: Vec2, here: Vec2, options: List[Vec2]) -> Vec2:
+        incoming = math.atan2(here[1] - prev[1], here[0] - prev[0])
+
+        def turn(opt: Vec2) -> float:
+            ang = math.atan2(opt[1] - here[1], opt[0] - here[0])
+            return (ang - incoming) % (2.0 * math.pi)
+
+        return min(options, key=turn)
+
+    loops: List[Poly] = []
+    guard_edges = sum(len(dests) for dests in remaining.values()) + 2
+    while any(remaining.values()):
+        start = next(node for node, dests in remaining.items() if dests)
+        here = start
+        prev: Vec2 | None = None
+        poly: Poly = [start]
+        seen = 0
+        while True:
+            options = remaining.get(here, [])
+            if not options:
+                return []
+            nxt = options[0] if prev is None else pick(prev, here, options)
+            options.remove(nxt)
+            prev, here = here, nxt
+            seen += 1
+            if seen > guard_edges:
+                return []
+            if here == start:
+                break
+            poly.append(here)
+        if len(poly) >= 3 and abs(_shoelace(poly)) > 1.0:
+            loops.append(poly)
+    return loops
+
+
 def build_panels(params: InsertParams) -> List[Panel]:
     """Nest laser panels with spacing."""
     L, W, H, T = params.outer_length, params.outer_width, params.height, params.thickness
@@ -1448,6 +2055,8 @@ def build_panels(params: InsertParams) -> List[Panel]:
             holes.extend(_divider_end_slots_for_wall(name, length, H, T, d, params))
         holes.extend(_slide_slot_holes(params, name))
         holes.extend(_latch_wall_holes(params, name))
+        # A finger or a lid slot that meets the wall edge becomes part of that edge.
+        outline, holes = _open_slots_into_outline(outline, holes, params.kerf)
         place(name, outline, holes, length + 2 * T, wall_h + T)
 
     floor_top = T if params.floor else 0.0
@@ -1462,6 +2071,7 @@ def build_panels(params: InsertParams) -> List[Panel]:
         if d.leans():
             outline, holes = _leaned_divider_plate(d, params, joints, y0, y1)
             outline = _offset_kerf(outline, params.kerf, outward=True)
+            outline, holes = _open_slots_into_outline(outline, holes, params.kerf)
             xs = [p[0] for p in outline]
             ys = [p[1] for p in outline]
             minx, miny = min(xs), min(ys)
@@ -1543,6 +2153,7 @@ def build_panels(params: InsertParams) -> List[Panel]:
         holes.extend(_lean_slot_holes(joints, left_inset, body, y0, 1.0, params.kerf))
         holes.extend(_lean_finger_holes(joints, left_inset, lambda z: z, 1.0, end_pitch, T, params.kerf))
         outline = _offset_kerf(outline, params.kerf, outward=True)
+        outline, holes = _open_slots_into_outline(outline, holes, params.kerf)
         xs = [p[0] for p in outline]
         ys = [p[1] for p in outline]
         minx, miny = min(xs), min(ys)
@@ -2216,17 +2827,22 @@ def _latch_lid_holes(params: InsertParams) -> List[Poly]:
         return list(params.latch_finger_holes(params.kerf))
     thickness = params.thickness
     holes: List[Poly] = []
-    pad = 0.08
+    # Chamfer where a spring channel meets the lid edge, instead of a square corner
+    # that sticks out past the tab.
+    corner = 2.0
 
     def cut(across0: float, inward0: float, across1: float, inward1: float) -> None:
         if across1 - across0 < 0.3 or inward1 - inward0 < 0.3:
             return
         holes.append([
-            params.latch_point(across0 - pad, inward0 - pad),
-            params.latch_point(across1 + pad, inward0 - pad),
-            params.latch_point(across1 + pad, inward1 + pad),
-            params.latch_point(across0 - pad, inward1 + pad),
+            params.latch_point(across0, inward0),
+            params.latch_point(across1, inward0),
+            params.latch_point(across1, inward1),
+            params.latch_point(across0, inward1),
         ])
+
+    def cut_poly(points: List[Tuple[float, float]]) -> None:
+        holes.append([params.latch_point(u, v) for u, v in points])
 
     for center in params.latch_centers():
         x0 = center - width / 2.0
@@ -2240,22 +2856,36 @@ def _latch_lid_holes(params: InsertParams) -> List[Poly]:
         connector_left = last % 2 == 0
         left_end = beam_y(last) if connector_left else last_top + gap
         right_end = last_top + gap if connector_left else beam_y(last)
-        cut(x0 - gap, thickness - 0.4, x0, left_end)
-        cut(x1, thickness - 0.4, x1 + gap, right_end)
-        for index in range(loops):
-            yb0 = beam_y(index)
-            yb1 = yb0 + beam
-            if index % 2 == 0:
-                cut(x1 - gap, yb0, x1, yb1)
-            else:
-                cut(x0, yb0, x0 + gap, yb1)
+        # The diagonal runs past the lid edge so the cut meets that edge in one
+        # line. The inner wall follows the kerf-widened tab side, so the side
+        # stays straight into the tip bevel instead of stepping out by a kerf.
+        out = 0.4
+        half = params.kerf / 2.0
+        cut_poly([
+            (x0 - half, thickness - 0.4),
+            (x0 - half, left_end),
+            (x0 - gap, left_end),
+            (x0 - gap, thickness + corner),
+            (x0 - gap - corner - out, thickness - out),
+            (x0 - out, thickness - out),
+        ])
+        cut_poly([
+            (x1 + out, thickness - out),
+            (x1 + gap + corner + out, thickness - out),
+            (x1 + gap, thickness + corner),
+            (x1 + gap, right_end),
+            (x1 + half, right_end),
+            (x1 + half, thickness - 0.4),
+        ])
+        # The slots stop one beam short of the alternating side. No extra notch
+        # there: that step left a corner thinner than the beam.
         for index in range(loops - 1):
             yg0 = beam_y(index) + beam
             yg1 = yg0 + gap
             if index % 2 == 0:
-                cut(x0 + beam, yg0, x1, yg1)
+                cut(x0 + beam, yg0, x1 + half, yg1)
             else:
-                cut(x0, yg0, x1 - beam, yg1)
+                cut(x0 - half, yg0, x1 - beam, yg1)
         if connector_left:
             cut(x0 + beam, last_top, x1 + gap, last_top + gap)
         else:
@@ -2275,25 +2905,38 @@ def _add_latch_lid(params: InsertParams, place) -> None:
         if not pts or abs(pts[-1][0] - x) > 1e-9 or abs(pts[-1][1] - y) > 1e-9:
             pts.append((x, y))
 
+    # Chamfer the outer corners of each tab, the end that enters the wall.
+    # Leave the channel bevel at the lid edge as it is.
+    tip = min(2.0, thickness - 0.8)
+
+    def add_tip(u0: float, u1: float, root: float, end: float) -> None:
+        """One tab, walked from u0 to u1. `end` is the outer edge; those corners are cut back."""
+        span = abs(u1 - u0)
+        cut = min(tip, span / 4.0)
+        inward = 1.0 if end > root else -1.0
+        across = 1.0 if u1 > u0 else -1.0
+        add(u0, root)
+        add(u0, end - inward * cut)
+        add(u0 + across * cut, end)
+        add(u1 - across * cut, end)
+        add(u1, end - inward * cut)
+        add(u1, root)
+
     add(thickness, thickness)
     for left, right in params.latch_tab_spans():
-        add(left, thickness)
-        add(left, 0.0)
-        add(right, 0.0)
-        add(right, thickness)
+        add_tip(left, right, thickness, 0.0)
     add(across - thickness, thickness)
     add(across - thickness, along - thickness)
     for left, right in reversed(params.latch_back_tabs()):
-        add(right, along - thickness)
-        add(right, along)
-        add(left, along)
-        add(left, along - thickness)
+        add_tip(right, left, along - thickness, along)
     add(thickness, along - thickness)
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     minx, miny = min(xs), min(ys)
     outline = _offset_kerf([(p[0] - minx, p[1] - miny) for p in pts], params.kerf, outward=True)
     holes = [[(x - minx, y - miny) for x, y in hole] for hole in _latch_lid_holes(params)]
+    # The spring cuts overlap each other and the tab edge. Join them into that edge.
+    outline, holes = _open_slots_into_outline(outline, holes, params.kerf)
     place("lid-latch", outline, holes, max(xs) - minx, max(ys) - miny, "Lid")
 
 

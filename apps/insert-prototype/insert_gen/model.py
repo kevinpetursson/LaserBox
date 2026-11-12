@@ -104,6 +104,27 @@ class Divider(BaseModel):
         return (z0, z1)
 
 
+def odd_finger_count(span: float, finger_length: float) -> int:
+    """Odd finger count along `span`, nearest to `finger_length`.
+
+    Both ends of the edge stay the same kind of joint.
+    """
+    if span <= 1e-6 or finger_length <= 1e-6:
+        return 5
+    raw = span / finger_length
+    limit = max(3, int(raw) + 3)
+    best = 3
+    best_err = abs(span / 3.0 - finger_length)
+    count = 5
+    while count <= limit:
+        err = abs(span / count - finger_length)
+        if err < best_err:
+            best = count
+            best_err = err
+        count += 2
+    return best
+
+
 class InsertParams(BaseModel):
     """Parametric insert. Length and width are the outside dimensions."""
 
@@ -206,22 +227,7 @@ class InsertParams(BaseModel):
         Both ends of an edge stay the same kind of joint. Other edges reuse this
         spacing and may land a little long or short so their own ends still match.
         """
-        height = self.height
-        target = self.finger_length
-        if height <= 1e-6 or target <= 1e-6:
-            return 5
-        raw = height / target
-        limit = max(3, int(raw) + 3)
-        best = 3
-        best_err = abs(height / 3.0 - target)
-        count = 5
-        while count <= limit:
-            err = abs(height / count - target)
-            if err < best_err:
-                best = count
-                best_err = err
-            count += 2
-        return best
+        return odd_finger_count(self.height, self.finger_length)
 
     def closed_top(self) -> bool:
         """A finger-jointed panel fills the top of the walls and does not raise the box."""

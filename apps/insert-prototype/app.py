@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from insert_gen.kerf_test import export_kerf_dxf, export_kerf_svg
 from insert_gen.laser import build_panels, export_dxf, export_svg, panel_label
 from insert_gen.mesh import build_print_parts, export_stl
 from insert_gen.model import InsertParams, demo_params
@@ -102,6 +103,33 @@ def export(fmt: ExportFmt, params: InsertParams) -> Response:
         data = out.read_bytes()
     finally:
         out.unlink(missing_ok=True)
+    return Response(
+        content=data,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+KerfFmt = Literal["svg", "dxf"]
+
+
+@app.post("/api/kerf-test/{fmt}")
+def kerf_test(fmt: KerfFmt, params: InsertParams) -> Response:
+    """A 50 mm finger-joint corner at several kerfs, for finding the laser kerf."""
+    suffix = f".{fmt}"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        out = Path(tmp.name)
+    try:
+        if fmt == "svg":
+            export_kerf_svg(params, out)
+            media = "image/svg+xml"
+        else:
+            export_kerf_dxf(params, out)
+            media = "application/dxf"
+        data = out.read_bytes()
+    finally:
+        out.unlink(missing_ok=True)
+    filename = f"kerf-test.{fmt}"
     return Response(
         content=data,
         media_type=media,

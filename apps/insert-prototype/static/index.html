@@ -113,7 +113,7 @@
           <span class="field-name">Kerf (mm)
             <span class="info">
               <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-kerf" aria-label="About kerf">i</button>
-              <span id="tip-kerf" class="tip" role="tooltip" hidden>Width of material the laser burns away. Outlines are offset by half of this so the finished pieces match the size, and slots are opened so dividers still fit. Use 0 if your laser software already compensates.</span>
+              <span id="tip-kerf" class="tip" role="tooltip" hidden>Width of material the laser burns away. Outlines are offset by half of this so the finished pieces match the size, and slots are opened so dividers still fit. Use 0 if your laser software already compensates. Kerf test, below Export, cuts five 50 mm corners around this number so you can see which one fits.</span>
             </span>
           </span>
           <input id="kerf" type="number" step="0.01" min="0" />
@@ -268,6 +268,17 @@
         <button type="button" data-export="svg">Download SVG</button>
         <button type="button" data-export="dxf">Download DXF</button>
       </div>
+
+      <h2 class="with-info">Kerf test
+        <span class="info">
+          <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-kerf-test" aria-label="About the kerf test">i</button>
+          <span id="tip-kerf-test" class="tip" role="tooltip" hidden>Five corners on one sheet, each 50 mm tall. The kerfs are 0.05 mm apart and centered on the kerf above. Thickness and finger length come from those fields. Cut the sheet and press each pair together. Enter the number on the pair that fits with no gap and no force. NOW is drawn on the pair for the kerf typed in. The outlines are black and the numbers are blue, so the numbers can be engraved instead of cut. The joint is the same finger joint the box uses.</span>
+        </span>
+      </h2>
+      <div class="actions">
+        <button type="button" data-kerf-test="svg">Kerf test SVG</button>
+        <button type="button" data-kerf-test="dxf">Kerf test DXF</button>
+      </div>
       <p id="status" class="status" role="status"></p>
     </section>
 
@@ -322,6 +333,6 @@
     <p><a href="https://github.com/kevinpetursson/LaserBox">Source code</a> · <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a></p>
   </footer>
 
-  <script src="/static/app.js?v=layout-heights"></script>
+  <script src="/static/app.js?v=kerf-test"></script>
 </body>
 </html>
