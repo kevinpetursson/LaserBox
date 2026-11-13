@@ -132,7 +132,7 @@ class InsertParams(BaseModel):
     width: float = Field(200.0, gt=10, description="Outside width (mm)")
     height: float = Field(50.0, gt=5, description="Outside height, from the bottom of the box to the top of the walls")
     thickness: float = Field(3.0, ge=3.0, le=6.0, description="Material thickness (mm)")
-    kerf: float = Field(0.15, ge=0, description="Laser kerf compensation (mm)")
+    kerf: float = Field(0.25, ge=0, description="Laser kerf compensation (mm)")
     floor: bool = Field(True, description="Include floor (print); default on")
     finger_length: float = Field(
         10.0,
@@ -518,7 +518,7 @@ def demo_params() -> InsertParams:
         width=200.0,
         height=50.0,
         thickness=3.0,
-        kerf=0.15,
+        kerf=0.25,
         floor=True,
         finger_length=10.0,
         lid="none",

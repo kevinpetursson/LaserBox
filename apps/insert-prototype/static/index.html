@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Box Inserts — prototype</title>
-  <link rel="stylesheet" href="/static/style.css?v=layout-pop3" />
+  <link rel="stylesheet" href="/static/style.css?v=design-name" />
 </head>
 <body>
   <header>
@@ -59,12 +59,21 @@
 
   <main>
     <section class="panel" aria-label="Parameters">
+      <label class="design-name">
+        <span class="field-name">Name
+          <span class="info">
+            <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-name" aria-label="About the name">i</button>
+            <span id="tip-name" class="tip" role="tooltip" hidden>This is the file name for the design, the STL, the SVG, and the DXF. A kerf test adds -kerf-test. Characters a file name cannot use are left out. An empty name downloads as laser-box.</span>
+          </span>
+        </span>
+        <input id="design-name" type="text" maxlength="80" spellcheck="false" autocomplete="off" value="laser-box" />
+      </label>
       <h2>Box &amp; material</h2>
       <div class="dim-mode" role="group" aria-label="Length and width measurement">
         <span class="dim-mode-label">Length &amp; width</span>
         <div class="seg">
-          <button type="button" id="dim-inside" aria-pressed="true">Inside</button>
-          <button type="button" id="dim-outside" aria-pressed="false">Outside</button>
+          <button type="button" id="dim-inside" aria-pressed="false">Inside</button>
+          <button type="button" id="dim-outside" aria-pressed="true">Outside</button>
         </div>
         <span class="info">
           <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-dim-mode" aria-label="About inside and outside dimensions">i</button>
@@ -73,28 +82,28 @@
       </div>
       <div class="grid">
         <label>
-          <span class="field-name"><span id="length-label">Length ID (mm)</span>
+          <span class="field-name"><span id="length-label">Length OD (mm)</span>
             <span class="info">
               <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-length" aria-label="About length">i</button>
-              <span id="tip-length" class="tip" role="tooltip" hidden>Inside length, measured between the inner faces of the walls. The outside length is this plus twice the material thickness.</span>
+              <span id="tip-length" class="tip" role="tooltip" hidden>Outside length, measured across the outside of the walls. The inside length is this minus twice the material thickness.</span>
             </span>
           </span>
           <input id="length" type="number" step="0.1" min="20" />
         </label>
         <label>
-          <span class="field-name"><span id="width-label">Width ID (mm)</span>
+          <span class="field-name"><span id="width-label">Width OD (mm)</span>
             <span class="info">
               <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-width" aria-label="About width">i</button>
-              <span id="tip-width" class="tip" role="tooltip" hidden>Inside width, measured between the inner faces of the walls. The outside width is this plus twice the material thickness.</span>
+              <span id="tip-width" class="tip" role="tooltip" hidden>Outside width, measured across the outside of the walls. The inside width is this minus twice the material thickness.</span>
             </span>
           </span>
           <input id="width" type="number" step="0.1" min="20" />
         </label>
         <label>
-          <span class="field-name"><span id="height-label">Height ID (mm)</span>
+          <span class="field-name"><span id="height-label">Height OD (mm)</span>
             <span class="info">
               <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-height" aria-label="About height">i</button>
-              <span id="tip-height" class="tip" role="tooltip" hidden>Inside height, from the top of the floor to the top of the walls. The outside height is this plus the material thickness. With no floor, inside and outside height are the same.</span>
+              <span id="tip-height" class="tip" role="tooltip" hidden>Outside height, from the bottom of the box to the top of the walls. With a floor, the inside height is this minus the material thickness. With no floor, they are the same. When a lid makes the box taller, the note under this box shows the overall outside height.</span>
             </span>
           </span>
           <input id="height" type="number" step="0.1" min="10" />
@@ -113,7 +122,7 @@
           <span class="field-name">Kerf (mm)
             <span class="info">
               <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-kerf" aria-label="About kerf">i</button>
-              <span id="tip-kerf" class="tip" role="tooltip" hidden>Width of material the laser burns away. Outlines are offset by half of this so the finished pieces match the size, and slots are opened so dividers still fit. Use 0 if your laser software already compensates. Kerf test, below Export, cuts five 50 mm corners around this number so you can see which one fits.</span>
+              <span id="tip-kerf" class="tip" role="tooltip" hidden>Width of material the laser burns away. Outlines are offset by half of this so the finished pieces match the size, and slots are opened so dividers still fit. A larger number makes the joint tighter: the fingers are drawn wider and the gaps narrower. A smaller number makes it looser. If a test pair will not go together, enter a smaller kerf. If it rattles, enter a larger one. Use 0 if your laser software already compensates. Kerf test, below Export, cuts five 50 mm corners around this number so you can see which one fits.</span>
             </span>
           </span>
           <input id="kerf" type="number" step="0.01" min="0" />
@@ -157,7 +166,7 @@
         </label>
         <div class="grid" id="lid-height-row" hidden>
           <label>
-            <span class="field-name" id="side-height-label">Side height ID (mm)</span>
+            <span class="field-name" id="side-height-label">Side height OD (mm)</span>
             <input id="lid-height" type="number" step="0.1" min="3" max="80" value="15" />
           </label>
         </div>
@@ -333,6 +342,6 @@
     <p><a href="https://github.com/kevinpetursson/LaserBox">Source code</a> · <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a></p>
   </footer>
 
-  <script src="/static/app.js?v=kerf-test"></script>
+  <script src="/static/app.js?v=outside-default"></script>
 </body>
 </html>

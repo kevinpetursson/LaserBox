@@ -149,6 +149,10 @@ h2 {
 
 h2:first-child { margin-top: 0; }
 
+.design-name {
+  margin-bottom: 0.15rem;
+}
+
 h2.with-info {
   display: flex;
   align-items: center;

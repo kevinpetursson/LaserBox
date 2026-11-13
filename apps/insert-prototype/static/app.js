@@ -2,7 +2,7 @@ const fields = [
   "length", "width", "height", "thickness", "kerf", "finger_length",
 ];
 
-let dimMode = "inside";
+let dimMode = "outside";
 let lidMode = "none";
 let tabFit = "inner";
 let slideDir = "back";
@@ -1539,13 +1539,10 @@ function bindOrbit() {
 async function loadDefaults() {
   const res = await fetch("/api/defaults");
   const d = await res.json();
-  dimMode = "inside";
+  dimMode = "outside";
   updateDimLabels();
   for (const f of fields) el(f).value = d[f];
   const wall = d.thickness || 0;
-  el("length").value = roundMm(d.length - 2 * wall);
-  el("width").value = roundMm(d.width - 2 * wall);
-  el("height").value = roundMm(d.height - (d.floor ? wall : 0));
   el("floor").checked = !!d.floor;
   lidMode = knownLid(d.lid);
   latchCount = d.lid_latch_count === 2 ? 2 : 1;
@@ -1556,7 +1553,7 @@ async function loadDefaults() {
   slideDir = ["front", "left", "right", "back"].includes(d.lid_slide) ? d.lid_slide : "back";
   slideCount = d.lid_slide_count === 3 ? 3 : 2;
   tabFit = d.lid_tab_fit === "outer" ? "outer" : "inner";
-  el("lid-height").value = d.lid_height ?? 15;
+  el("lid-height").value = roundMm((d.lid_height ?? 15) + wall);
   el("lid-slide-tab").value = d.lid_slide_tab ?? 20;
   el("lid-tabs-on").checked = !!d.lid_tabs;
   el("lid-tab-height").value = d.lid_tab_height ?? 12;
@@ -1588,6 +1585,7 @@ const DESIGN_VERSION = 2;
 function designConfig() {
   return {
     version: DESIGN_VERSION,
+    name: designName(),
     measure: dimMode === "outside" ? "outside" : "inside",
     snap: el("snap-mm").checked,
     length: asNumber(el("length").value, 0),
@@ -1674,6 +1672,12 @@ function designProblems(data) {
   }
   const kerf = asNumber(data.kerf, NaN);
   if (!Number.isFinite(kerf) || kerf < 0) problems.push("Kerf must be zero or a positive number.");
+  if (data.version >= 2 || data.name != null) {
+    const savedName = typeof data.name === "string" ? data.name.replace(/\s+/g, " ").trim() : "";
+    if (!savedName || savedName.length > 80) {
+      problems.push("Name must be text, up to 80 characters.");
+    }
+  }
   const fingerLength = asNumber(data.finger_length, NaN);
   if (data.version >= 2 || data.finger_length != null) {
     if (!Number.isFinite(fingerLength) || fingerLength < 4 || fingerLength > 40) {
@@ -1896,6 +1900,9 @@ function applyDesign(data) {
   el("height").value = data.height;
   el("thickness").value = data.thickness;
   el("kerf").value = asNumber(data.kerf, 0);
+  el("design-name").value = typeof data.name === "string" && data.name.trim()
+    ? data.name.replace(/\s+/g, " ").trim().slice(0, 80)
+    : "laser-box";
   if (data.finger_length != null) {
     el("finger_length").value = asNumber(data.finger_length, 10);
   } else if (Number.isInteger(data.finger_count) && data.finger_count > 0) {
@@ -1949,21 +1956,18 @@ function applyDesign(data) {
   draw();
 }
 
-function designFileName() {
-  const t = materialThickness();
-  const shown = (id) => {
-    const n = parseFloat(el(id).value);
-    return Number.isFinite(n) ? n : 0;
-  };
-  const walls = dimMode === "inside" ? 2 * t : 0;
-  const length = roundMm(shown("length") + walls);
-  const width = roundMm(shown("width") + walls);
-  const height = roundMm(outsideHeight());
-  return `box-insert-${length}x${width}x${height}.json`;
+function designName() {
+  const cleaned = String(el("design-name").value || "")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/g, "")
+    .slice(0, 80);
+  return cleaned || "laser-box";
 }
 
 function downloadDesign() {
-  const name = designFileName();
+  const name = `${designName()}.json`;
   const blob = new Blob([JSON.stringify(designConfig(), null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -2028,11 +2032,12 @@ async function downloadFile(url, filename, busy, done) {
 }
 
 async function doExport(fmt) {
+  const file = `${designName()}.${fmt}`;
   return downloadFile(
     `/api/export/${fmt}`,
-    `insert.${fmt}`,
+    file,
     `Building ${fmt.toUpperCase()}…`,
-    `Downloaded insert.${fmt}`
+    `Downloaded ${file}`
   );
 }
 
@@ -2183,11 +2188,12 @@ document.querySelectorAll("[data-export]").forEach((btn) => {
 document.querySelectorAll("[data-kerf-test]").forEach((btn) => {
   btn.addEventListener("click", () => {
     const fmt = btn.dataset.kerfTest;
+    const file = `${designName()}-kerf-test.${fmt}`;
     downloadFile(
       `/api/kerf-test/${fmt}`,
-      `kerf-test.${fmt}`,
+      file,
       "Building kerf test…",
-      `Downloaded kerf-test.${fmt}. NOW is the kerf typed above.`
+      `Downloaded ${file}. NOW is the kerf typed above.`
     );
   });
 });

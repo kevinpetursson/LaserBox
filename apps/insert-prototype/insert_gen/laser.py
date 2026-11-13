@@ -10,6 +10,7 @@ from typing import List, Tuple
 import ezdxf
 import numpy as np
 import svgwrite
+from ezdxf.enums import TextEntityAlignment
 
 from .model import Divider, InsertParams
 
@@ -300,8 +301,10 @@ def _wall_panel_outline(
             end = height if cap is None else limit
             return [(root, y0), (root, end)] if at_right else [(root, end), (root, y0)]
         raw = corner_raw(edge_h, male)
+        # Finger tips land on the outside of the wall. The valleys are cut back
+        # by one thickness, so the joint is inside the outside dimension.
         if at_right:
-            pts = [(length - y, x + y0) for x, y in raw]
+            pts = [(length - thickness - y, x + y0) for x, y in raw]
             if floor_fingers and (abs(pts[0][0] - length) > 1e-9 or abs(pts[0][1] - y0) > 1e-9):
                 pts.insert(0, (length, y0))
             if cap is None and height > limit + 1e-6:
@@ -309,7 +312,7 @@ def _wall_panel_outline(
                     pts.append((root, pts[-1][1]))
                 pts.append((root, height))
             return pts
-        pts_up = [(y, x + y0) for x, y in raw]
+        pts_up = [(y + thickness, x + y0) for x, y in raw]
         if floor_fingers and (abs(pts_up[0][0]) > 1e-9 or abs(pts_up[0][1] - y0) > 1e-9):
             pts_up.insert(0, (0.0, y0))
         if cap is None and height > limit + 1e-6:
@@ -353,12 +356,16 @@ def _finger_spans(length: float, count: int, male: bool = True) -> List[Tuple[fl
     return spans
 
 
-def _spans_for_length(length: float, pitch: float) -> List[Tuple[float, float]]:
-    """Finger spans sized to `pitch`, with an odd count so both ends are fingers."""
+def _spans_for_length(length: float, pitch: float, male: bool = True) -> List[Tuple[float, float]]:
+    """Finger spans sized to `pitch`, with an odd count so both ends match.
+
+    `male` puts a finger at each end. A divider end uses the other phase, so the
+    piece it joins keeps material at the top and bottom of that joint.
+    """
     if length < 1e-6:
         return []
     count = max(1, int(round(length / pitch))) if pitch > 1e-6 else 1
-    return _finger_spans(length, count, male=True)
+    return _finger_spans(length, count, male=male)
 
 
 def _bottom_polyline(length: float, depth: float, spans: List[Tuple[float, float]]) -> Poly:
@@ -1152,7 +1159,11 @@ def _divider_finger_slots_on_floor(
     notch_kind: str = "cross-bottom",
     y_open: float = 0.0,
 ) -> List[Poly]:
-    """Finger slots through the floor. Gaps between fingers stay solid so the divider sits on them.
+    """Finger slots through the floor or a closed top.
+
+    The first and last segments stay solid, so the panel is not cut where the
+    divider meets a wall. Gaps between the remaining fingers stay solid so the
+    divider sits on them.
 
     The span stops at the face of a divider this one fingers into, and skips a cross-lap
     that is cut up from the bottom.
@@ -1163,7 +1174,7 @@ def _divider_finger_slots_on_floor(
     owned = joints or []
     t0, t1 = _floor_finger_limits(length, owned, params.thickness)
     pitch = params.height / _odd_count(params.finger_count)
-    spans = [(a + t0, b + t0) for a, b in _spans_for_length(t1 - t0, pitch)]
+    spans = [(a + t0, b + t0) for a, b in _spans_for_length(t1 - t0, pitch, male=False)]
     spans = _subtract_spans(
         spans, _notch_intervals(owned, notch_kind, params.kerf, y_open=y_open)
     )
@@ -1313,8 +1324,11 @@ def _vertical_fingers(
     pitch: float,
     outward: float,
 ) -> Poly:
-    """Upward edge. `outward` is +1 for a right edge and -1 for a left edge."""
-    spans = [(a + y_lo, b + y_lo) for a, b in _spans_for_length(y_hi - y_lo, pitch)]
+    """Upward edge. `outward` is +1 for a right edge and -1 for a left edge.
+
+    The end segments are gaps, so a five-finger joint has two tabs.
+    """
+    spans = [(a + y_lo, b + y_lo) for a, b in _spans_for_length(y_hi - y_lo, pitch, male=False)]
     pts: Poly = []
 
     def add(px: float, py: float) -> None:
@@ -1411,7 +1425,7 @@ def _divider_outline(
     fx0 = 0.0 if finger_x0 is None else max(0.0, finger_x0)
     fx1 = length if finger_x1 is None else min(length, finger_x1)
     along_spans = (
-        [(a + fx0, b + fx0) for a, b in _spans_for_length(fx1 - fx0, bottom_pitch)]
+        [(a + fx0, b + fx0) for a, b in _spans_for_length(fx1 - fx0, bottom_pitch, male=False)]
         if fx1 > fx0 + 1.0
         else []
     )
@@ -2057,7 +2071,7 @@ def build_panels(params: InsertParams) -> List[Panel]:
         holes.extend(_latch_wall_holes(params, name))
         # A finger or a lid slot that meets the wall edge becomes part of that edge.
         outline, holes = _open_slots_into_outline(outline, holes, params.kerf)
-        place(name, outline, holes, length + 2 * T, wall_h + T)
+        place(name, outline, holes, length, wall_h + T)
 
     floor_top = T if params.floor else 0.0
     end_pitch = (H - floor_top) / _odd_count(fingers)
@@ -2182,7 +2196,10 @@ def _finger_slots_between(
     pitch: float,
     y_min: float = 0.0,
 ) -> List[Poly]:
-    """Finger slots from y_lo to y_hi. y_min keeps them out of a floor joint."""
+    """Finger slots from y_lo to y_hi. The top and bottom of that span stay solid.
+
+    y_min keeps a slot out of a floor joint.
+    """
     sw = thickness + kerf
     sx = min(max(0.0, along - sw / 2.0), max(0.0, wall_length - sw))
     lo = max(y_lo, y_min)
@@ -2190,7 +2207,7 @@ def _finger_slots_between(
     if hi < lo + 1.0 or pitch <= 1e-6:
         return []
     holes: List[Poly] = []
-    for a, b in _spans_for_length(hi - lo, pitch):
+    for a, b in _spans_for_length(hi - lo, pitch, male=False):
         yy0 = a + lo - kerf / 2.0
         yy1 = b + lo + kerf / 2.0
         if y_min > 0.0:
@@ -2316,13 +2333,16 @@ def _clip_polyline_band(pts: Poly, lo: float, hi: float) -> Poly:
 
 
 def _z_finger_spans(z0: float, z1: float, pitch: float, rate: float) -> List[Tuple[float, float]]:
-    """Finger intervals of world height. `rate` is plate distance per world height."""
+    """Finger intervals of world height. `rate` is plate distance per world height.
+
+    The first and last segments are gaps, matching a divider end.
+    """
     if z1 < z0 + 1e-6 or pitch <= 1e-6:
         return []
     edge = (z1 - z0) * rate
     if edge < 1.0:
         return []
-    return [(z0 + a / rate, z0 + b / rate) for a, b in _spans_for_length(edge, pitch)]
+    return [(z0 + a / rate, z0 + b / rate) for a, b in _spans_for_length(edge, pitch, male=False)]
 
 
 def _angled_end_edge(
@@ -2480,7 +2500,7 @@ def _leaned_floor_slots(
     wide = params.thickness / max(0.2, abs(math.cos(d.tilt_radians())))
     t0, t1 = _floor_finger_limits(length, joints, params.thickness)
     pitch = params.height / _odd_count(params.finger_count)
-    spans = [(a + t0, b + t0) for a, b in _spans_for_length(max(0.0, t1 - t0), pitch)]
+    spans = [(a + t0, b + t0) for a, b in _spans_for_length(max(0.0, t1 - t0), pitch, male=False)]
     spans = _subtract_spans(spans, _notch_intervals(joints, notch_kind, params.kerf, y_open=y_open))
     holes: List[Poly] = []
     for a, b in spans:
@@ -2633,7 +2653,7 @@ def _leaned_divider_plate(
     bottom_pitch = params.height / _odd_count(params.finger_count)
     kerf = params.kerf
     t0, t1 = _floor_finger_limits(length, joints, thickness)
-    along_spans = [(a + t0, b + t0) for a, b in _spans_for_length(max(0.0, t1 - t0), bottom_pitch)]
+    along_spans = [(a + t0, b + t0) for a, b in _spans_for_length(max(0.0, t1 - t0), bottom_pitch, male=False)]
     finger_spans = along_spans if tongue > 0.0 else []
     top_spans = along_spans if lid_tongue > 0.0 else []
     bottom_notches: List[Tuple[float, float, float]] = []
@@ -3228,6 +3248,8 @@ def export_dxf(params: InsertParams, path: Path | str) -> Path:
     doc = ezdxf.new("R2010")
     msp = doc.modelspace()
     doc.units = ezdxf.units.MM
+    doc.layers.add("CUT", color=7)
+    doc.layers.add("LABEL", color=5)
     for panel in panels:
         pts = _translate(panel.outline, panel.origin)
         # close
@@ -3239,5 +3261,11 @@ def export_dxf(params: InsertParams, path: Path | str) -> Path:
             if hpts[0] != hpts[-1]:
                 hpts = hpts + [hpts[0]]
             msp.add_lwpolyline(hpts, close=True, dxfattribs={"layer": "CUT"})
+        text, font, (lx, ly) = panel_label(panel)
+        label = msp.add_text(text, height=font, dxfattribs={"layer": "LABEL"})
+        label.set_placement(
+            (panel.origin[0] + lx, panel.origin[1] + ly),
+            align=TextEntityAlignment.MIDDLE_CENTER,
+        )
     doc.saveas(str(path))
     return path
