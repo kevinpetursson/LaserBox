@@ -9,6 +9,10 @@ let slideDir = "back";
 let slideCount = 2;
 let latchCount = 1;
 let latchSide = "front";
+let openings = [];
+let selectedOpening = -1;
+let openingDrag = null;
+let svgTarget = -1;
 
 function roundMm(n) {
   return Math.round(n * 100) / 100;
@@ -56,6 +60,7 @@ function readParams() {
   const latchWidth = parseFloat(el("lid-latch-width").value);
   params.lid_latch_width = Math.min(80, Math.max(14, Number.isFinite(latchWidth) ? latchWidth : 30));
   params.dividers = [];
+  params.openings = [];
   const wall = params.thickness;
   document.querySelectorAll("#dividers .divider-row").forEach((row) => {
     const num = (cls) => parseFloat(row.querySelector(cls).value);
@@ -76,7 +81,21 @@ function readParams() {
       floor_fingers: row.querySelector(".h-floor-fingers").checked,
       top_fingers: row.querySelector(".h-top-fingers").checked,
       label: (row.dataset.label || "").replace(/\s+/g, " ").trim().slice(0, 40),
+      openings: [],
     });
+  });
+  const grouped = params.dividers.map(() => []);
+  openings.forEach((op) => {
+    const match = /^divider-(\d+)$/.exec(op.host);
+    if (match) {
+      const index = Number(match[1]);
+      if (grouped[index]) grouped[index].push(openingApi(op, false));
+      return;
+    }
+    params.openings.push(openingApi(op, true));
+  });
+  params.dividers.forEach((div, index) => {
+    div.openings = grouped[index];
   });
   return params;
 }
@@ -173,6 +192,7 @@ function syncLidFields() {
   }
   el("slide-tabs-2").setAttribute("aria-pressed", slideCount === 2 ? "true" : "false");
   el("slide-tabs-3").setAttribute("aria-pressed", slideCount === 3 ? "true" : "false");
+  refreshHostSelects();
 }
 
 function knownLid(value) {
@@ -292,6 +312,7 @@ function refreshDividerLabels() {
     const input = row.querySelector(".d-name");
     if (input) input.placeholder = `Divider ${i + 1}`;
   });
+  refreshHostSelects();
 }
 
 function applyDividerSelection() {
@@ -500,8 +521,10 @@ function addDividerRow(d) {
     btn.addEventListener("click", () => setHeightUnit(row, btn.dataset.unit));
   });
   row.querySelector(".danger").addEventListener("click", () => {
+    const index = dividerRows().indexOf(row);
     if (selectedDivider === row) selectedDivider = null;
     row.remove();
+    reindexOpenings(index);
     refreshDividerLabels();
     draw();
   });
@@ -610,18 +633,28 @@ function paint3d(triangles, parts) {
   }
 
   const quant = (v) => `${Math.round(v[0] * 50)},${Math.round(v[1] * 50)},${Math.round(v[2] * 50)}`;
-  const edgeCount = new Map();
+  const edgeNormals = new Map();
   const edgeOf = (a, b) => {
     const ka = quant(a);
     const kb = quant(b);
     return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
   };
-  for (const tri of triangles) {
+  triangles.forEach((tri) => {
+    const n = norm3(cross3(sub3(tri[1], tri[0]), sub3(tri[2], tri[0])));
     for (let i = 0; i < 3; i++) {
       const key = edgeOf(tri[i], tri[(i + 1) % 3]);
-      edgeCount.set(key, (edgeCount.get(key) || 0) + 1);
+      const list = edgeNormals.get(key);
+      if (list) list.push(n);
+      else edgeNormals.set(key, [n]);
     }
-  }
+  });
+  const crease = (key) => {
+    const normals = edgeNormals.get(key) || [];
+    for (let i = 1; i < normals.length; i++) {
+      if (Math.abs(dot3(normals[0], normals[i])) < 0.985) return true;
+    }
+    return false;
+  };
 
   const lidFaces = new Set();
   if (parts) {
@@ -649,7 +682,7 @@ function paint3d(triangles, parts) {
       dot3(n, basis.forward),
     ];
     const light = Math.abs(dot3(norm3(viewN), norm3([0.25, 0.75, 0.45])));
-    const edges = [0, 1, 2].filter((i) => edgeCount.get(edgeOf(tri[i], tri[(i + 1) % 3])) > 1);
+    const edges = [0, 1, 2].filter((i) => crease(edgeOf(tri[i], tri[(i + 1) % 3])));
     return { pts, depth, light, edges, hot: highlight.has(index), lid: lidFaces.has(index) };
   });
   faces.sort((a, b) => a.depth - b.depth);
@@ -1452,9 +1485,11 @@ function bindPlan() {
 
 function redraw() {
   paintPlan();
+  paintOpeningPiece();
   if (!lastPreview) return;
   paint3d(lastPreview.triangles, lastPreview.parts);
   paint2d(lastPreview.panels);
+  paintOpeningNotes();
 }
 
 function caption(p, pieceCount) {
@@ -1580,7 +1615,758 @@ function asNumber(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-const DESIGN_VERSION = 2;
+const OPENING_SHAPES = [
+  ["rect", "Rectangle"],
+  ["roundrect", "Rounded rectangle"],
+  ["oval", "Oval"],
+  ["obround", "Obround"],
+  ["svg", "SVG"],
+];
+
+function openingApi(op, withHost) {
+  const api = {
+    shape: op.shape,
+    x: op.x,
+    y: op.y,
+    width: Math.max(0.1, op.width),
+    height: Math.max(0.1, op.height),
+    radius: Math.max(0, op.radius || 0),
+    rotation: op.rotation || 0,
+    lock: !!op.lock,
+    force: !!op.force,
+    points: op.shape === "svg" && Array.isArray(op.points) ? op.points : [],
+    source: op.source || "",
+  };
+  if (withHost) api.host = op.host;
+  return api;
+}
+
+function normalizeOpening(op, host) {
+  const source = op && typeof op === "object" ? op : {};
+  const shape = OPENING_SHAPES.some(([id]) => id === source.shape) ? source.shape : "rect";
+  const points = Array.isArray(source.points)
+    ? source.points
+        .filter((pt) => Array.isArray(pt) && pt.length >= 2)
+        .slice(0, 500)
+        .map((pt) => [asNumber(pt[0], 0), asNumber(pt[1], 0)])
+    : [];
+  return {
+    host: host || "wall-front",
+    shape,
+    x: asNumber(source.x, 0),
+    y: asNumber(source.y, 0),
+    width: Math.min(4000, Math.max(0.1, asNumber(source.width, 20))),
+    height: Math.min(4000, Math.max(0.1, asNumber(source.height, 10))),
+    radius: Math.min(2000, Math.max(0, asNumber(source.radius, 0))),
+    rotation: Math.max(-360, Math.min(360, asNumber(source.rotation, 0))),
+    lock: source.lock === true,
+    force: source.force === true,
+    points,
+    source: typeof source.source === "string" ? source.source.replace(/\s+/g, " ").trim().slice(0, 80) : "",
+  };
+}
+
+function checkOpening(op, name, problems, hostRequired) {
+  if (!op || typeof op !== "object" || Array.isArray(op)) {
+    problems.push(`${name} is not an opening.`);
+    return;
+  }
+  if (hostRequired) {
+    const hosts = ["wall-front", "wall-back", "wall-left", "wall-right", "lid", "lid-front", "lid-back", "lid-left", "lid-right"];
+    if (!hosts.includes(op.host)) problems.push(`${name} is not on a wall or a lid piece.`);
+  }
+  if (!OPENING_SHAPES.some(([id]) => id === op.shape)) problems.push(`${name} shape is not recognized.`);
+  ["x", "y", "width", "height", "rotation"].forEach((key) => {
+    if (!Number.isFinite(asNumber(op[key], NaN))) problems.push(`${name} ${key} must be a number.`);
+  });
+  const width = asNumber(op.width, NaN);
+  const height = asNumber(op.height, NaN);
+  if (Number.isFinite(width) && !(width > 0)) problems.push(`${name} width must be greater than 0.`);
+  if (Number.isFinite(height) && !(height > 0)) problems.push(`${name} height must be greater than 0.`);
+  const radius = asNumber(op.radius, NaN);
+  if (!Number.isFinite(radius) || radius < 0) problems.push(`${name} corner radius must be zero or more.`);
+  const rotation = asNumber(op.rotation, NaN);
+  if (Number.isFinite(rotation) && (rotation < -360 || rotation > 360)) {
+    problems.push(`${name} rotation must be from -360 to 360 degrees.`);
+  }
+  if (op.points != null && !Array.isArray(op.points)) problems.push(`${name} outline must be a list of points.`);
+  if (Array.isArray(op.points)) {
+    if (op.points.length > 500) problems.push(`${name} outline has too many points.`);
+    else if (op.points.some((pt) => !Array.isArray(pt) || pt.length < 2 || !Number.isFinite(asNumber(pt[0], NaN)) || !Number.isFinite(asNumber(pt[1], NaN)))) {
+      problems.push(`${name} outline has a point that is not an x and a y.`);
+    }
+  }
+  if (op.lock != null && typeof op.lock !== "boolean") {
+    problems.push(`${name} scale lock must be on or off.`);
+  }
+  if (op.force != null && typeof op.force !== "boolean") {
+    problems.push(`${name} overlap acknowledgement must be on or off.`);
+  }
+  if (op.source != null && (typeof op.source !== "string" || op.source.length > 80)) {
+    problems.push(`${name} file name must be 80 characters or fewer.`);
+  }
+}
+
+function hostChoices() {
+  const choices = [
+    ["wall-front", "Front wall"],
+    ["wall-back", "Back wall"],
+    ["wall-left", "Left wall"],
+    ["wall-right", "Right wall"],
+  ];
+  if (lidMode !== "none") choices.push(["lid", "Lid"]);
+  if (lidMode === "cap" || lidMode === "top") {
+    choices.push(
+      ["lid-front", "Lid front"],
+      ["lid-back", "Lid back"],
+      ["lid-left", "Lid left"],
+      ["lid-right", "Lid right"]
+    );
+  }
+  dividerRows().forEach((row, index) => {
+    choices.push([`divider-${index}`, dividerDisplayName(row, index)]);
+  });
+  return choices;
+}
+
+function fillHostSelect(select, current) {
+  const choices = hostChoices();
+  if (!choices.some(([id]) => id === current)) choices.unshift([current, "Not in this box"]);
+  select.replaceChildren();
+  choices.forEach(([id, label]) => {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = label;
+    select.appendChild(option);
+  });
+  select.value = current;
+}
+
+function refreshHostSelects() {
+  document.querySelectorAll("#openings .opening-row").forEach((row, index) => {
+    const op = openings[index];
+    const select = row.querySelector(".op-host");
+    if (op && select) fillHostSelect(select, op.host);
+  });
+}
+
+function outsideSpan(fieldId) {
+  const shown = parseFloat(el(fieldId).value);
+  const value = Number.isFinite(shown) ? shown : 0;
+  return dimMode === "inside" ? value + 2 * materialThickness() : value;
+}
+
+function newOpening() {
+  return {
+    host: "wall-front",
+    shape: "rect",
+    x: roundMm(outsideSpan("length") / 2),
+    y: roundMm(outsideHeight() / 2),
+    width: 30,
+    height: 14,
+    radius: 4,
+    rotation: 0,
+    lock: false,
+    force: false,
+    points: [],
+    source: "",
+  };
+}
+
+function reindexOpenings(removed) {
+  if (removed < 0) return;
+  const host = `divider-${removed}`;
+  let removedBefore = 0;
+  openings = openings.filter((op, index) => {
+    if (op.host !== host) return true;
+    if (index < selectedOpening) removedBefore += 1;
+    if (index === selectedOpening) selectedOpening = -1;
+    return false;
+  });
+  openings.forEach((op) => {
+    const match = /^divider-(\d+)$/.exec(op.host);
+    if (match && Number(match[1]) > removed) op.host = `divider-${Number(match[1]) - 1}`;
+  });
+  if (selectedOpening >= 0) selectedOpening -= removedBefore;
+  if (selectedOpening >= openings.length) selectedOpening = openings.length - 1;
+  renderOpenings();
+}
+
+function scaleLocked(width, height, scale, minSize) {
+  const w = Math.max(width, 0.1);
+  const h = Math.max(height, 0.1);
+  const floor = Math.max(minSize / w, minSize / h);
+  const cap = Math.min(4000 / w, 4000 / h);
+  const next = Math.min(cap, Math.max(floor, scale));
+  return { width: roundMm(w * next), height: roundMm(h * next) };
+}
+
+function readOpeningRow(row, op, edited) {
+  op.host = row.querySelector(".op-host").value;
+  op.shape = row.querySelector(".op-shape").value;
+  op.x = asNumber(row.querySelector(".op-x").value, op.x);
+  op.y = asNumber(row.querySelector(".op-y").value, op.y);
+  op.radius = Math.min(2000, Math.max(0, asNumber(row.querySelector(".op-r").value, op.radius)));
+  op.rotation = Math.max(-360, Math.min(360, asNumber(row.querySelector(".op-rot").value, op.rotation)));
+  const width = Math.min(4000, Math.max(0.1, asNumber(row.querySelector(".op-w").value, op.width)));
+  const height = Math.min(4000, Math.max(0.1, asNumber(row.querySelector(".op-h").value, op.height)));
+  if (op.lock && (edited === "width" || edited === "height")) {
+    const base = edited === "width" ? op.width : op.height;
+    const next = edited === "width" ? width : height;
+    const sized = scaleLocked(op.width, op.height, base > 0 ? next / base : 1, 0.1);
+    op.width = sized.width;
+    op.height = sized.height;
+    if (edited !== "width") row.querySelector(".op-w").value = op.width;
+    if (edited !== "height") row.querySelector(".op-h").value = op.height;
+  } else {
+    op.width = width;
+    op.height = height;
+  }
+  const force = row.querySelector(".op-force-input");
+  if (force) op.force = force.checked;
+}
+
+function renderOpenings() {
+  const root = el("openings");
+  root.replaceChildren();
+  openings.forEach((op, index) => {
+    const row = document.createElement("div");
+    row.className = "opening-row";
+    row.innerHTML = `
+      <div class="opening-head">
+        <button type="button" class="opening-select" aria-pressed="false">Select</button>
+        <label>Piece<select class="op-host"></select></label>
+        <button type="button" class="danger" aria-label="Remove opening">Remove</button>
+      </div>
+      <label>Shape<select class="op-shape"></select></label>
+      <label>Rotation (°)<input class="op-rot" type="number" step="1" min="-360" max="360" value="${op.rotation}" /></label>
+      <label>X (mm)<input class="op-x" type="number" step="0.1" value="${op.x}" /></label>
+      <label>Y (mm)<input class="op-y" type="number" step="0.1" value="${op.y}" /></label>
+      <div class="op-size">
+        <label>Width (mm)<input class="op-w" type="number" step="0.1" min="0.1" value="${op.width}" /></label>
+        <button type="button" class="op-lock" aria-pressed="${op.lock ? "true" : "false"}" aria-label="${op.lock ? "Unlock width and height" : "Lock width and height together"}" title="${op.lock ? "Unlock width and height" : "Lock width and height together"}">
+          <svg class="icon-open" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="5" y="11" width="14" height="9" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.8"/>
+            <path d="M8.2 11V8a3.8 3.8 0 0 1 6.6-2.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+          <svg class="icon-linked" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="5" y="11" width="14" height="9" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.8"/>
+            <path d="M8.2 11V8a3.8 3.8 0 0 1 7.6 0V11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <label>Height (mm)<input class="op-h" type="number" step="0.1" min="0.1" value="${op.height}" /></label>
+      </div>
+      <label class="op-radius">Corner radius (mm)<input class="op-r" type="number" step="0.1" min="0" value="${op.radius}" /></label>
+      <div class="op-svg">
+        <button type="button" class="secondary op-upload">Upload SVG</button>
+        <span class="op-source"></span>
+      </div>
+      <label class="check op-force" hidden>
+        <input class="op-force-input" type="checkbox" ${op.force ? "checked" : ""} />
+        I understand there is an overlap. Generate the cut path anyway.
+      </label>
+      <p class="gap-warn op-warn" role="alert" hidden></p>
+    `;
+    const shape = row.querySelector(".op-shape");
+    OPENING_SHAPES.forEach(([id, label]) => {
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = label;
+      shape.appendChild(option);
+    });
+    shape.value = op.shape;
+    fillHostSelect(row.querySelector(".op-host"), op.host);
+    row.querySelector(".op-source").textContent = op.source || (op.shape === "svg" ? "No file yet" : "");
+    const syncFields = () => {
+      row.querySelector(".op-radius").hidden = op.shape !== "roundrect";
+      row.querySelector(".op-svg").hidden = op.shape !== "svg";
+    };
+    syncFields();
+    row.querySelector(".opening-select").addEventListener("click", () => {
+      selectedOpening = selectedOpening === index ? -1 : index;
+      applyOpeningSelection();
+    });
+    row.querySelector(".danger").addEventListener("click", () => {
+      openings.splice(index, 1);
+      if (selectedOpening === index) selectedOpening = Math.min(index, openings.length - 1);
+      else if (selectedOpening > index) selectedOpening -= 1;
+      renderOpenings();
+      draw();
+    });
+    row.querySelector(".op-upload").addEventListener("click", () => {
+      svgTarget = index;
+      el("opening-svg").click();
+    });
+    row.querySelector(".op-lock").addEventListener("click", () => {
+      op.lock = !op.lock;
+      const lock = row.querySelector(".op-lock");
+      const lockLabel = op.lock ? "Unlock width and height" : "Lock width and height together";
+      lock.setAttribute("aria-pressed", op.lock ? "true" : "false");
+      lock.setAttribute("aria-label", lockLabel);
+      lock.title = lockLabel;
+      selectedOpening = index;
+      applyOpeningSelection();
+    });
+    row.querySelectorAll("input, select").forEach((input) => {
+      const edited = () => (input.classList.contains("op-w") ? "width" : input.classList.contains("op-h") ? "height" : "");
+      input.addEventListener("input", () => {
+        readOpeningRow(row, op, edited());
+        paintOpeningNotes();
+        if (input.classList.contains("op-shape")) {
+          syncFields();
+          row.querySelector(".op-source").textContent = op.source || (op.shape === "svg" ? "No file yet" : "");
+        }
+        selectedOpening = index;
+        applyOpeningSelection();
+        draw();
+      });
+      input.addEventListener("change", () => {
+        readOpeningRow(row, op, edited());
+        if (input.classList.contains("op-host") || input.classList.contains("op-shape")) {
+          renderOpenings();
+        }
+        draw();
+      });
+    });
+    root.appendChild(row);
+  });
+  applyOpeningSelection();
+  paintOpeningNotes();
+  paintOpeningPiece();
+}
+
+function applyOpeningSelection() {
+  document.querySelectorAll("#openings .opening-row").forEach((row, index) => {
+    const on = index === selectedOpening;
+    row.classList.toggle("is-selected", on);
+    row.querySelector(".opening-select").setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  paintOpeningPiece();
+}
+
+function hostIndex(op, index) {
+  return openings.slice(0, index).filter((item) => item.host === op.host).length;
+}
+
+function paintOpeningNotes() {
+  const notes = (lastPreview && lastPreview.openings) || [];
+  document.querySelectorAll("#openings .opening-row").forEach((row, index) => {
+    const op = openings[index];
+    const warn = row.querySelector(".op-warn");
+    if (!op || !warn) return;
+    const local = hostIndex(op, index);
+    const note = notes.find((item) => item.host === op.host && item.index === local);
+    const placement = note && !note.ok && (
+      note.reason === "Leave at least the material thickness of wood around this opening."
+      || note.reason === "This opening overlaps another opening on this piece."
+      || note.reason === "This opening runs into a joint or another cut."
+    );
+    const allow = row.querySelector(".op-force");
+    if (allow) allow.hidden = !placement;
+    if (note && !note.ok && !(placement && op.force)) {
+      warn.hidden = false;
+      warn.textContent = note.reason;
+    } else {
+      warn.hidden = true;
+      warn.textContent = "";
+    }
+  });
+}
+
+function arcPoints(cx, cy, radius, a0, a1, steps) {
+  const pts = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const ang = a0 + (a1 - a0) * i / steps;
+    pts.push([cx + radius * Math.cos(ang), cy + radius * Math.sin(ang)]);
+  }
+  return pts;
+}
+
+function shapeLocal(shape, width, height, radius) {
+  const w = width / 2;
+  const h = height / 2;
+  if (shape === "oval") {
+    const steps = 40;
+    return Array.from({ length: steps }, (_, i) => [
+      w * Math.cos(2 * Math.PI * i / steps),
+      h * Math.sin(2 * Math.PI * i / steps),
+    ]);
+  }
+  if (shape === "obround") {
+    if (width >= height) {
+      const r = h;
+      const cx = w - r;
+      return arcPoints(cx, 0, r, -Math.PI / 2, Math.PI / 2, 12)
+        .concat(arcPoints(-cx, 0, r, Math.PI / 2, 3 * Math.PI / 2, 12));
+    }
+    const r = w;
+    const cy = h - r;
+    return arcPoints(0, -cy, r, Math.PI, 2 * Math.PI, 12)
+      .concat(arcPoints(0, cy, r, 0, Math.PI, 12));
+  }
+  if (shape === "roundrect") {
+    const limit = Math.min(w, h);
+    const r = Math.min(Math.max(0, radius || 0), limit);
+    if (r < 0.05) return [[-w, -h], [w, -h], [w, h], [-w, h]];
+    return arcPoints(w - r, -h + r, r, -Math.PI / 2, 0, 8).slice(0, -1)
+      .concat(arcPoints(w - r, h - r, r, 0, Math.PI / 2, 8).slice(0, -1))
+      .concat(arcPoints(-w + r, h - r, r, Math.PI / 2, Math.PI, 8).slice(0, -1))
+      .concat(arcPoints(-w + r, -h + r, r, Math.PI, 3 * Math.PI / 2, 8).slice(0, -1));
+  }
+  return [[-w, -h], [w, -h], [w, h], [-w, h]];
+}
+
+function openingPolygon(op) {
+  let local;
+  if (op.shape === "svg") {
+    if (!op.points || op.points.length < 3) return [];
+    const xs = op.points.map((pt) => pt[0]);
+    const ys = op.points.map((pt) => pt[1]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const nw = Math.max(...xs) - Math.min(...xs);
+    const nh = Math.max(...ys) - Math.min(...ys);
+    if (nw < 1e-6 || nh < 1e-6) return [];
+    local = op.points.map((pt) => [((pt[0] - cx) * op.width) / nw, ((pt[1] - cy) * op.height) / nh]);
+  } else {
+    local = shapeLocal(op.shape, op.width, op.height, op.radius);
+  }
+  const rad = (op.rotation || 0) * Math.PI / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  return local.map(([x, y]) => [op.x + x * c - y * s, op.y + x * s + y * c]);
+}
+
+function pointInPoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0; i < poly.length; i += 1) {
+    const [x0, y0] = poly[i];
+    const [x1, y1] = poly[(i + 1) % poly.length];
+    if ((y0 > y) !== (y1 > y)) {
+      const cross = ((x1 - x0) * (y - y0)) / (y1 - y0) + x0;
+      if (x < cross) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function onPieceEdge(x, y, frame) {
+  const edge = 0.4;
+  const along = x >= frame.x0 - edge && x <= frame.x1 + edge && y >= frame.y0 - edge && y <= frame.y1 + edge;
+  if (!along) return false;
+  return Math.abs(x - frame.x0) <= edge || Math.abs(x - frame.x1) <= edge
+    || Math.abs(y - frame.y0) <= edge || Math.abs(y - frame.y1) <= edge;
+}
+
+function segmentsCross(a, b, c, d) {
+  const orient = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  const d1 = orient(c, d, a);
+  const d2 = orient(c, d, b);
+  const d3 = orient(a, b, c);
+  const d4 = orient(a, b, d);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+function hitsFingers(poly, frame) {
+  const outline = frame.outline || [];
+  if (poly.length < 3 || outline.length < 3) return false;
+  const fingerAt = outline.map(([x, y]) => !onPieceEdge(x, y, frame));
+  if (!fingerAt.some(Boolean)) return false;
+  for (let i = 0; i < poly.length; i += 1) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const inRect = a[0] > frame.x0 && a[0] < frame.x1 && a[1] > frame.y0 && a[1] < frame.y1;
+    if (inRect && !pointInPoly(a[0], a[1], outline)) return true;
+    const pastRect = a[0] < frame.x0 || a[0] > frame.x1 || a[1] < frame.y0 || a[1] > frame.y1;
+    if (pastRect && pointInPoly(a[0], a[1], outline)) return true;
+    for (let j = 0; j < outline.length; j += 1) {
+      if (!fingerAt[j] && !fingerAt[(j + 1) % outline.length]) continue;
+      const c = outline[j];
+      const d = outline[(j + 1) % outline.length];
+      if (c[0] === d[0] && c[1] === d[1]) continue;
+      if (segmentsCross(a, b, c, d)) return true;
+    }
+  }
+  return false;
+}
+
+function pieceFrame(host) {
+  const frames = (lastPreview && lastPreview.frames) || [];
+  return frames.find((frame) => frame.host === host) || null;
+}
+
+function pieceHint(host) {
+  if (!host) return "Add an opening to cut a hole in a wall, a lid, or a divider.";
+  if (host === "lid") return "X from the left outside, Y from the front. A cap hangs past that corner.";
+  if (host.startsWith("divider-")) return "X from the first endpoint, Y up the face of this divider.";
+  if (host.startsWith("lid-")) return "X from the left end of this lid side, Y up from the edge that joins the lid.";
+  return "X from the left end of this wall, Y up from the outside bottom.";
+}
+
+function paintOpeningPiece() {
+  const canvas = el("opening-piece");
+  const note = el("opening-piece-note");
+  if (!canvas) return;
+  const op = openings[selectedOpening];
+  const { ctx, w, h } = fitCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#101613";
+  ctx.fillRect(0, 0, w, h);
+  if (!op) {
+    if (note) note.textContent = "Add an opening to cut a hole in a wall, a lid, or a divider.";
+    return;
+  }
+  if (note) note.textContent = pieceHint(op.host);
+  const frame = pieceFrame(op.host);
+  if (!frame) {
+    ctx.fillStyle = "#9aafa0";
+    ctx.font = "14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("That piece is not in this box.", w / 2, h / 2);
+    return;
+  }
+  const pad = 18;
+  const view = pieceView(frame);
+  const spanX = Math.max(view.x1 - view.x0, 1);
+  const spanY = Math.max(view.y1 - view.y0, 1);
+  const scale = Math.min((w - pad * 2) / spanX, (h - pad * 2) / spanY);
+  const ox = (w - spanX * scale) / 2;
+  const oy = (h - spanY * scale) / 2;
+  const sx = (x) => ox + (x - view.x0) * scale;
+  const sy = (y) => oy + (view.y1 - y) * scale;
+  const stroke = (poly, color, width) => {
+    if (poly.length < 2) return;
+    ctx.beginPath();
+    ctx.moveTo(sx(poly[0][0]), sy(poly[0][1]));
+    for (let i = 1; i < poly.length; i += 1) ctx.lineTo(sx(poly[i][0]), sy(poly[i][1]));
+    ctx.closePath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.stroke();
+  };
+  if (frame.outline && frame.outline.length > 2) stroke(frame.outline, "#5ee0d0", 1.4);
+  else stroke([[frame.x0, frame.y0], [frame.x1, frame.y0], [frame.x1, frame.y1], [frame.x0, frame.y1]], "#5ee0d0", 1.4);
+  (frame.cuts || []).forEach((cut) => {
+    if (cut.length < 3) return;
+    ctx.beginPath();
+    ctx.moveTo(sx(cut[0][0]), sy(cut[0][1]));
+    for (let i = 1; i < cut.length; i += 1) ctx.lineTo(sx(cut[i][0]), sy(cut[i][1]));
+    ctx.closePath();
+    ctx.fillStyle = "rgba(125, 154, 140, 0.35)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(186, 214, 204, 0.95)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  });
+  const m = frame.margin || 0;
+  if (frame.x1 - frame.x0 > m * 2 && frame.y1 - frame.y0 > m * 2) {
+    ctx.setLineDash([4, 4]);
+    stroke(
+      [[frame.x0 + m, frame.y0 + m], [frame.x1 - m, frame.y0 + m], [frame.x1 - m, frame.y1 - m], [frame.x0 + m, frame.y1 - m]],
+      "rgba(196, 163, 90, 0.8)",
+      1
+    );
+    ctx.setLineDash([]);
+  }
+  openings.forEach((item, index) => {
+    if (item.host !== op.host) return;
+    const poly = openingPolygon(item);
+    const local = hostIndex(item, index);
+    const notes = (lastPreview && lastPreview.openings) || [];
+    const note = notes.find((entry) => entry.host === item.host && entry.index === local);
+    const overlaps = !!(
+      (note && !note.ok && (
+        note.reason === "Leave at least the material thickness of wood around this opening."
+        || note.reason === "This opening overlaps another opening on this piece."
+        || note.reason === "This opening runs into a joint or another cut."
+      ))
+      || hitsFingers(poly, frame)
+    );
+    const color = overlaps
+      ? "#e85d4c"
+      : index === selectedOpening
+        ? (note && !note.ok ? "#e6b040" : "#f2d48a")
+        : "rgba(94, 224, 208, 0.7)";
+    stroke(poly, color, overlaps || index === selectedOpening ? 2 : 1);
+  });
+  const handle = handlePoint(op);
+  ctx.beginPath();
+  ctx.arc(sx(handle[0]), sy(handle[1]), 5, 0, Math.PI * 2);
+  ctx.fillStyle = "#f2d48a";
+  ctx.fill();
+  canvas._openingMap = { frame, view, ox, oy, scale };
+}
+
+function pieceView(frame) {
+  let x0 = frame.x0;
+  let y0 = frame.y0;
+  let x1 = frame.x1;
+  let y1 = frame.y1;
+  const polys = [];
+  if (frame.outline && frame.outline.length) polys.push(frame.outline);
+  (frame.cuts || []).forEach((cut) => polys.push(cut));
+  polys.forEach((poly) => {
+    poly.forEach(([x, y]) => {
+      if (x < x0) x0 = x;
+      if (y < y0) y0 = y;
+      if (x > x1) x1 = x;
+      if (y > y1) y1 = y;
+    });
+  });
+  return { x0, y0, x1, y1 };
+}
+
+function handlePoint(op) {
+  const rad = (op.rotation || 0) * Math.PI / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  const x = op.width / 2;
+  const y = -op.height / 2;
+  return [op.x + x * c - y * s, op.y + x * s + y * c];
+}
+
+function eventToPiece(event) {
+  const canvas = el("opening-piece");
+  const map = canvas._openingMap;
+  if (!map) return null;
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  const origin = map.view || map.frame;
+  return [
+    origin.x0 + (x - map.ox) / map.scale,
+    origin.y1 - (y - map.oy) / map.scale,
+  ];
+}
+
+function writeOpeningFields(index) {
+  const row = document.querySelectorAll("#openings .opening-row")[index];
+  const op = openings[index];
+  if (!row || !op) return;
+  row.querySelector(".op-x").value = roundMm(op.x);
+  row.querySelector(".op-y").value = roundMm(op.y);
+  row.querySelector(".op-w").value = roundMm(op.width);
+  row.querySelector(".op-h").value = roundMm(op.height);
+}
+
+function bindOpeningPiece() {
+  const canvas = el("opening-piece");
+  canvas.addEventListener("pointerdown", (event) => {
+    const op = openings[selectedOpening];
+    const point = eventToPiece(event);
+    if (!op || !point) return;
+    const handle = handlePoint(op);
+    const map = canvas._openingMap;
+    const dist = Math.hypot(point[0] - handle[0], point[1] - handle[1]) * (map ? map.scale : 1);
+    const poly = openingPolygon(op);
+    let mode = null;
+    if (dist <= 10) mode = "resize";
+    else if (pointInPoly(point[0], point[1], poly)) mode = "move";
+    else {
+      const hit = openings.findIndex((item, index) => item.host === op.host && pointInPoly(point[0], point[1], openingPolygon(item)) && index !== selectedOpening);
+      if (hit >= 0) {
+        selectedOpening = hit;
+        applyOpeningSelection();
+        return;
+      }
+      return;
+    }
+    openingDrag = {
+      mode,
+      index: selectedOpening,
+      px: point[0],
+      py: point[1],
+      x: op.x,
+      y: op.y,
+      width: op.width,
+      height: op.height,
+    };
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!openingDrag) return;
+    const point = eventToPiece(event);
+    const op = openings[openingDrag.index];
+    if (!point || !op) return;
+    const dx = point[0] - openingDrag.px;
+    const dy = point[1] - openingDrag.py;
+    if (openingDrag.mode === "move") {
+      op.x = roundMm(openingDrag.x + dx);
+      op.y = roundMm(openingDrag.y + dy);
+    } else {
+      const rad = (op.rotation || 0) * Math.PI / 180;
+      const c = Math.cos(rad);
+      const s = Math.sin(rad);
+      const alongX = dx * c + dy * s;
+      const alongY = -dx * s + dy * c;
+      if (op.lock) {
+        const localX = openingDrag.width / 2 + alongX;
+        const localY = -openingDrag.height / 2 + alongY;
+        const start = Math.hypot(openingDrag.width / 2, openingDrag.height / 2) || 1;
+        const sized = scaleLocked(openingDrag.width, openingDrag.height, Math.hypot(localX, localY) / start, 2);
+        op.width = sized.width;
+        op.height = sized.height;
+      } else {
+        op.width = roundMm(Math.max(2, openingDrag.width + alongX * 2));
+        op.height = roundMm(Math.max(2, openingDrag.height - alongY * 2));
+      }
+    }
+    writeOpeningFields(openingDrag.index);
+    paintOpeningPiece();
+  });
+  const endDrag = () => {
+    if (!openingDrag) return;
+    openingDrag = null;
+    draw();
+  };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+}
+
+async function uploadOpeningSvg(file) {
+  const status = el("status");
+  const index = svgTarget;
+  const op = openings[index];
+  if (!op) return;
+  let text = "";
+  try {
+    text = await file.text();
+  } catch (err) {
+    status.textContent = "Could not read that SVG.";
+    return;
+  }
+  status.textContent = "Reading the SVG…";
+  try {
+    const res = await fetch("/api/opening-svg", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ svg: text }),
+    });
+    if (!res.ok) {
+      let message = "Could not use that SVG.";
+      try {
+        const body = await res.json();
+        if (typeof body.detail === "string") message = body.detail;
+      } catch (err) { /* the status line is enough */ }
+      status.textContent = message;
+      return;
+    }
+    const data = await res.json();
+    op.shape = "svg";
+    op.points = data.points;
+    op.width = data.width;
+    op.height = data.height;
+    op.source = file.name.replace(/\s+/g, " ").trim().slice(0, 80);
+    selectedOpening = index;
+    renderOpenings();
+    draw();
+    status.textContent = `Using ${op.source}. Width and height match the file.`;
+  } catch (err) {
+    status.textContent = "Could not use that SVG.";
+  }
+}
+
+const DESIGN_VERSION = 3;
 
 function designConfig() {
   return {
@@ -1595,6 +2381,9 @@ function designConfig() {
     kerf: asNumber(el("kerf").value, 0),
     finger_length: asNumber(el("finger_length").value, 10),
     floor: el("floor").checked,
+    openings: openings
+      .filter((op) => !String(op.host).startsWith("divider-"))
+      .map((op) => openingApi(op, true)),
     lid: lidMode,
     lid_height: asNumber(el("lid-height").value, 15),
     lid_tabs: el("lid-tabs-on").checked,
@@ -1611,7 +2400,7 @@ function designConfig() {
     lid_latch_loops: parseInt(el("lid-latch-loops").value, 10) || 4,
     lid_latch_beam: asNumber(el("lid-latch-beam").value, 2),
     lid_latch_width: asNumber(el("lid-latch-width").value, 30),
-    dividers: dividerRows().map((row) => {
+    dividers: dividerRows().map((row, index) => {
       const n = (cls) => asNumber(row.querySelector(cls).value, 0);
       return {
         label: (row.dataset.label || "").replace(/\s+/g, " ").trim().slice(0, 40),
@@ -1625,6 +2414,9 @@ function designConfig() {
         tilt: n(".h-tilt"),
         floor_fingers: row.querySelector(".h-floor-fingers").checked,
         top_fingers: row.querySelector(".h-top-fingers").checked,
+        openings: openings
+          .filter((op) => op.host === `divider-${index}`)
+          .map((op) => openingApi(op, false)),
       };
     }),
   };
@@ -1744,6 +2536,10 @@ function designProblems(data) {
   if (data.lid_slide_count !== 2 && data.lid_slide_count !== 3) {
     problems.push("Side tabs must be 2 or 3.");
   }
+  if (data.version >= 3 || data.openings != null) {
+    if (!Array.isArray(data.openings)) problems.push("Openings must be a list.");
+    else data.openings.forEach((op, index) => checkOpening(op, `Opening ${index + 1}`, problems, true));
+  }
   const slideTab = asNumber(data.lid_slide_tab, NaN);
   if (
     !Number.isFinite(slideTab) || slideTab <= 0 || slideTab > 80
@@ -1799,6 +2595,10 @@ function designProblems(data) {
     }
     if (div.label != null && (typeof div.label !== "string" || div.label.length > 40)) {
       problems.push(`${name} name must be 40 characters or fewer.`);
+    }
+    if (data.version >= 3 || div.openings != null) {
+      if (!Array.isArray(div.openings)) problems.push(`${name} openings must be a list.`);
+      else div.openings.forEach((op, index) => checkOpening(op, `${name} opening ${index + 1}`, problems, false));
     }
   });
   return problems;
@@ -1948,6 +2748,18 @@ function applyDesign(data) {
     top_fingers: div.top_fingers !== false,
   }));
 
+  openings = [];
+  (Array.isArray(data.openings) ? data.openings : []).forEach((op) => {
+    openings.push(normalizeOpening(op, op && op.host));
+  });
+  (data.dividers || []).forEach((div, index) => {
+    (Array.isArray(div.openings) ? div.openings : []).forEach((op) => {
+      openings.push(normalizeOpening(op, `divider-${index}`));
+    });
+  });
+  selectedOpening = openings.length ? 0 : -1;
+  renderOpenings();
+
   syncLidFields();
   syncDimLimits();
   enforceLidMins();
@@ -2047,6 +2859,18 @@ el("add-divider").addEventListener("click", () => {
   addDividerRow(newDividerDefaults());
   draw();
 });
+el("add-opening").addEventListener("click", () => {
+  openings.push(newOpening());
+  selectedOpening = openings.length - 1;
+  renderOpenings();
+  draw();
+});
+el("opening-svg").addEventListener("change", () => {
+  const file = el("opening-svg").files && el("opening-svg").files[0];
+  el("opening-svg").value = "";
+  if (file) uploadOpeningSvg(file);
+});
+bindOpeningPiece();
 
 function setPreviewHeight(canvas, px) {
   const next = Math.max(140, Math.min(window.innerHeight * 0.85, px));

@@ -3,9 +3,72 @@
 from __future__ import annotations
 
 import math
-from typing import List, Literal
+from typing import List, Literal, Tuple
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+OpeningShape = Literal["rect", "roundrect", "oval", "obround", "svg"]
+OpeningHost = Literal[
+    "wall-front",
+    "wall-back",
+    "wall-left",
+    "wall-right",
+    "lid",
+    "lid-front",
+    "lid-back",
+    "lid-left",
+    "lid-right",
+]
+
+
+class Opening(BaseModel):
+    """One cut-out on a wall, a lid piece, or a divider.
+
+    The center is in that piece's own coordinates, in millimetres. Width and
+    height are the finished size. An SVG outline is stored flat, centered on
+    the opening, and scaled to width and height.
+    """
+
+    shape: OpeningShape = "rect"
+    x: float = Field(0.0, ge=-20000, le=20000)
+    y: float = Field(0.0, ge=-20000, le=20000)
+    width: float = Field(20.0, gt=0, le=4000)
+    height: float = Field(10.0, gt=0, le=4000)
+    radius: float = Field(0.0, ge=0, le=2000)
+    rotation: float = Field(0.0, ge=-360, le=360)
+    lock: bool = False
+    force: bool = False
+    points: List[Tuple[float, float]] = Field(default_factory=list)
+    source: str = Field("", description="File name of an uploaded SVG.")
+
+    @field_validator("source")
+    @classmethod
+    def clean_source(cls, value: str) -> str:
+        return " ".join(value.split())[:80]
+
+    @field_validator("points")
+    @classmethod
+    def clean_points(cls, value: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        if len(value) > 500:
+            raise ValueError("An opening outline can have at most 500 points")
+        cleaned: List[Tuple[float, float]] = []
+        for point in value:
+            if len(point) != 2:
+                raise ValueError("Each outline point needs an x and a y")
+            x, y = float(point[0]), float(point[1])
+            if not math.isfinite(x) or not math.isfinite(y):
+                raise ValueError("Outline points must be finite numbers")
+            if abs(x) > 20000 or abs(y) > 20000:
+                raise ValueError("Outline points must stay within 20000 mm of the center")
+            cleaned.append((x, y))
+        return cleaned
+
+
+class BoxOpening(Opening):
+    """An opening on a wall or a lid piece. Divider openings live on the divider."""
+
+    host: OpeningHost = "wall-front"
 
 
 class Divider(BaseModel):
@@ -49,6 +112,7 @@ class Divider(BaseModel):
         description="Finger-joint a divider that reaches the top into a closed-box lid. "
         "Off stops that divider under the lid with a straight edge and no lid slots.",
     )
+    openings: List[Opening] = Field(default_factory=list)
 
     @field_validator("label")
     @classmethod
@@ -183,6 +247,7 @@ class InsertParams(BaseModel):
     lid_latch_beam: float = Field(2.0, ge=1.0, le=4.0, description="Wood left between the latch cuts")
     lid_latch_width: float = Field(30.0, ge=14.0, le=80.0, description="Width of one latch spring")
     dividers: List[Divider] = Field(default_factory=list)
+    openings: List[BoxOpening] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_lid_minimums(self) -> InsertParams:

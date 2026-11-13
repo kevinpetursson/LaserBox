@@ -13,6 +13,7 @@ import svgwrite
 from ezdxf.enums import TextEntityAlignment
 
 from .model import Divider, InsertParams
+from .openings import OpeningReport, resolve_openings
 
 Vec2 = Tuple[float, float]
 Poly = List[Vec2]
@@ -1967,7 +1968,111 @@ def _stitch_loops(segments: List[Tuple[Vec2, Vec2]]) -> List[Poly]:
     return loops
 
 
-def build_panels(params: InsertParams) -> List[Panel]:
+def _hosted(params: InsertParams, host: str):
+    return [opening for opening in params.openings if opening.host == host]
+
+
+def _user_bounds(outline: Poly, dx: float, dy: float) -> Tuple[float, float, float, float]:
+    """Piece bounds in user coordinates. Panel points are user points plus (dx, dy)."""
+    xs = [p[0] for p in outline]
+    ys = [p[1] for p in outline]
+    return (min(xs) - dx, min(ys) - dy, max(xs) - dx, max(ys) - dy)
+
+
+def _apply_openings(
+    params: InsertParams,
+    host: str,
+    openings,
+    bounds: Tuple[float, float, float, float],
+    obstacles: List[Poly],
+    dx: float,
+    dy: float,
+    report: OpeningReport | None,
+    shape: Poly | None = None,
+    marks: List[Poly] | None = None,
+) -> List[Poly]:
+    """Kerf-inset cuts in panel coordinates.
+
+    `bounds` is the piece in user coordinates. `obstacles` are joints and slots
+    already on the panel. A panel point is the user point plus (dx, dy).
+    `shape` is the piece outline and `marks` are the other cuts, both in panel
+    coordinates. They are stored on the report so the piece preview can draw them.
+    """
+    if report is not None:
+        x0, y0, x1, y1 = bounds
+
+        def user_poly(poly: Poly) -> Poly:
+            return [(x - dx, y - dy) for x, y in poly]
+
+        shown = marks if marks is not None else obstacles
+        report.frame(
+            host,
+            x0,
+            y0,
+            x1,
+            y1,
+            params.thickness,
+            user_poly(shape) if shape else [],
+            [user_poly(poly) for poly in shown],
+        )
+    if not openings:
+        return []
+    user_obs = [[(x - dx, y - dy) for x, y in hole] for hole in obstacles if len(hole) >= 3]
+    resolved = resolve_openings(openings, bounds, params.thickness, user_obs, params.kerf)
+    cuts: List[Poly] = []
+    for item in resolved:
+        if report is not None:
+            report.note(host, item)
+        if item["cut"]:
+            cuts.append([(x + dx, y + dy) for x, y in item["cut"]])
+    return cuts
+
+
+def _shift_polys(polys: List[Poly], dx: float, dy: float) -> List[Poly]:
+    return [[(x + dx, y + dy) for x, y in poly] for poly in polys]
+
+
+def _note_unplaced(params: InsertParams, report: OpeningReport | None) -> None:
+    if report is None:
+        return
+    seen = {(note["host"], note["index"]) for note in report.notes}
+    per_host: dict[str, int] = {}
+    for opening in params.openings:
+        local = per_host.get(opening.host, 0)
+        per_host[opening.host] = local + 1
+        if (opening.host, local) not in seen:
+            report.notes.append(
+                {
+                    "host": opening.host,
+                    "index": local,
+                    "ok": False,
+                    "reason": "That piece is not part of this box.",
+                    "polygon": [],
+                }
+            )
+    for divider_index, divider in enumerate(params.dividers):
+        host = f"divider-{divider_index}"
+        for index, _opening in enumerate(divider.openings):
+            if (host, index) not in seen:
+                report.notes.append(
+                    {
+                        "host": host,
+                        "index": index,
+                        "ok": False,
+                        "reason": "That divider has no plate to cut.",
+                        "polygon": [],
+                    }
+                )
+
+
+def accepted_opening_users(params: InsertParams) -> dict:
+    """Finished opening outlines that will be cut, in each piece's coordinates."""
+    report = OpeningReport()
+    build_panels(params, report)
+    return report.users
+
+
+def build_panels(params: InsertParams, report: OpeningReport | None = None) -> List[Panel]:
     """Nest laser panels with spacing."""
     L, W, H, T = params.outer_length, params.outer_width, params.height, params.thickness
     fingers = params.finger_count
@@ -2040,6 +2145,12 @@ def build_panels(params: InsertParams) -> List[Panel]:
             plate = d.plate_span(H, T, params.floor, True)
             if plate is not None and plate[1] >= H - 1e-6:
                 lid_holes.extend(divider_slots(d, joints, "cross-top", H))
+        lid_holes.extend(
+            _apply_openings(
+                params, "lid", _hosted(params, "lid"), (0.0, 0.0, L, W), lid_holes, 0.0, 0.0, report,
+                shape=lid_outline, marks=list(lid_holes),
+            )
+        )
         place("lid-closed", lid_outline, lid_holes, L, W, "Lid")
 
     # Four walls: long, long, short, short
@@ -2070,7 +2181,22 @@ def build_panels(params: InsertParams) -> List[Panel]:
         holes.extend(_slide_slot_holes(params, name))
         holes.extend(_latch_wall_holes(params, name))
         # A finger or a lid slot that meets the wall edge becomes part of that edge.
+        raw_holes = list(holes)
         outline, holes = _open_slots_into_outline(outline, holes, params.kerf)
+        holes.extend(
+            _apply_openings(
+                params,
+                name,
+                _hosted(params, name),
+                (0.0, 0.0, length, wall_h),
+                raw_holes,
+                0.0,
+                0.0,
+                report,
+                shape=outline,
+                marks=list(holes),
+            )
+        )
         place(name, outline, holes, length, wall_h + T)
 
     floor_top = T if params.floor else 0.0
@@ -2084,6 +2210,18 @@ def build_panels(params: InsertParams) -> List[Panel]:
         joints = div_joints[i]
         if d.leans():
             outline, holes = _leaned_divider_plate(d, params, joints, y0, y1)
+            cuts = _apply_openings(
+                params,
+                f"divider-{i}",
+                d.openings,
+                _user_bounds(outline, 0.0, 0.0),
+                holes,
+                0.0,
+                0.0,
+                report,
+                shape=outline,
+                marks=list(holes),
+            )
             outline = _offset_kerf(outline, params.kerf, outward=True)
             outline, holes = _open_slots_into_outline(outline, holes, params.kerf)
             xs = [p[0] for p in outline]
@@ -2091,6 +2229,7 @@ def build_panels(params: InsertParams) -> List[Panel]:
             minx, miny = min(xs), min(ys)
             outline = [(p[0] - minx, p[1] - miny) for p in outline]
             holes = [[(p[0] - minx, p[1] - miny) for p in hole] for hole in holes]
+            holes.extend(_shift_polys(cuts, -minx, -miny))
             place(
                 f"divider-{i}",
                 outline,
@@ -2166,6 +2305,20 @@ def build_panels(params: InsertParams) -> List[Panel]:
         holes.extend(_closed_cross_holes(joints, left_inset, body, y0, y1, params.kerf))
         holes.extend(_lean_slot_holes(joints, left_inset, body, y0, 1.0, params.kerf))
         holes.extend(_lean_finger_holes(joints, left_inset, lambda z: z, 1.0, end_pitch, T, params.kerf))
+        dx = -left_inset
+        dy = y0
+        cuts = _apply_openings(
+            params,
+            f"divider-{i}",
+            d.openings,
+            _user_bounds(outline, dx, dy),
+            holes,
+            dx,
+            dy,
+            report,
+            shape=outline,
+            marks=list(holes),
+        )
         outline = _offset_kerf(outline, params.kerf, outward=True)
         outline, holes = _open_slots_into_outline(outline, holes, params.kerf)
         xs = [p[0] for p in outline]
@@ -2173,6 +2326,7 @@ def build_panels(params: InsertParams) -> List[Panel]:
         minx, miny = min(xs), min(ys)
         outline = [(p[0] - minx, p[1] - miny) for p in outline]
         holes = [[(p[0] - minx, p[1] - miny) for p in hole] for hole in holes]
+        holes.extend(_shift_polys(cuts, -minx, -miny))
         place(
             f"divider-{i}",
             outline,
@@ -2182,7 +2336,8 @@ def build_panels(params: InsertParams) -> List[Panel]:
             d.label,
         )
 
-    _add_lid_panels(params, place)
+    _add_lid_panels(params, place, report)
+    _note_unplaced(params, report)
     return panels
 
 
@@ -2914,7 +3069,37 @@ def _latch_lid_holes(params: InsertParams) -> List[Poly]:
     return holes
 
 
-def _add_latch_lid(params: InsertParams, place) -> None:
+def _slide_sheet_bounds(params: InsertParams) -> Tuple[float, float, float, float]:
+    """The sliding sheet's main rectangle, in box coordinates."""
+    a0, a1 = params.slide_body_across()
+    span = params.slide_span()
+    corners = [
+        params.slide_point(0.0, a0),
+        params.slide_point(0.0, a1),
+        params.slide_point(span, a0),
+        params.slide_point(span, a1),
+    ]
+    xs = [point[0] for point in corners]
+    ys = [point[1] for point in corners]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _latch_sheet_bounds(params: InsertParams) -> Tuple[float, float, float, float]:
+    """The latch sheet inside its tabs, in box coordinates."""
+    across, along = params.latch_axes()
+    thickness = params.thickness
+    corners = [
+        params.latch_point(thickness, thickness),
+        params.latch_point(across - thickness, thickness),
+        params.latch_point(across - thickness, along - thickness),
+        params.latch_point(thickness, along - thickness),
+    ]
+    xs = [point[0] for point in corners]
+    ys = [point[1] for point in corners]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _add_latch_lid(params: InsertParams, place, report: OpeningReport | None = None) -> None:
     """One sheet. The spring tabs enter the chosen wall, and two plain tabs enter the opposite wall."""
     thickness = params.thickness
     across, along = params.latch_axes()
@@ -2954,9 +3139,15 @@ def _add_latch_lid(params: InsertParams, place) -> None:
     ys = [p[1] for p in pts]
     minx, miny = min(xs), min(ys)
     outline = _offset_kerf([(p[0] - minx, p[1] - miny) for p in pts], params.kerf, outward=True)
-    holes = [[(x - minx, y - miny) for x, y in hole] for hole in _latch_lid_holes(params)]
+    raw_holes = _latch_lid_holes(params)
+    cuts = _apply_openings(
+        params, "lid", _hosted(params, "lid"), _latch_sheet_bounds(params), raw_holes, 0.0, 0.0, report,
+        shape=pts, marks=list(raw_holes),
+    )
+    holes = _shift_polys(raw_holes, -minx, -miny)
     # The spring cuts overlap each other and the tab edge. Join them into that edge.
     outline, holes = _open_slots_into_outline(outline, holes, params.kerf)
+    holes.extend(_shift_polys(cuts, -minx, -miny))
     place("lid-latch", outline, holes, max(xs) - minx, max(ys) - miny, "Lid")
 
 
@@ -3005,7 +3196,7 @@ def _slide_slot_holes(params: InsertParams, wall_name: str) -> List[Poly]:
     return holes
 
 
-def _add_slide_lid(params: InsertParams, place) -> None:
+def _add_slide_lid(params: InsertParams, place, report: OpeningReport | None = None) -> None:
     """One sheet. The front reaches the outside of the entry wall. The back is plain."""
     a0, a1 = params.slide_body_across()
     outer0, outer1 = params.slide_outer_across()
@@ -3037,13 +3228,19 @@ def _add_slide_lid(params: InsertParams, place) -> None:
     minx, miny = min(xs), min(ys)
     outline = _offset_kerf([(p[0] - minx, p[1] - miny) for p in pts], params.kerf, outward=True)
     finger = params.slide_finger_hole(params.kerf)
-    holes = [[(x - minx, y - miny) for x, y in finger]] if finger else []
+    obstacles = [finger] if finger else []
+    cuts = _apply_openings(
+        params, "lid", _hosted(params, "lid"), _slide_sheet_bounds(params), obstacles, 0.0, 0.0, report,
+        shape=pts, marks=list(obstacles),
+    )
+    holes = _shift_polys(obstacles, -minx, -miny)
+    holes.extend(_shift_polys(cuts, -minx, -miny))
     width = max(xs) - minx
     height = max(ys) - miny
     place("lid-slide", outline, holes, width, height, "Lid")
 
 
-def _add_lid_panels(params: InsertParams, place) -> None:
+def _add_lid_panels(params: InsertParams, place, report: OpeningReport | None = None) -> None:
     """Finger-jointed lid: a cap over the outside, or a same-size lid on the walls.
 
     A sit-on-top lid can include glue-on corner tabs at the corners you choose.
@@ -3053,10 +3250,10 @@ def _add_lid_panels(params: InsertParams, place) -> None:
     if params.lid == "none" or params.closed_top():
         return
     if params.lid == "slide":
-        _add_slide_lid(params, place)
+        _add_slide_lid(params, place, report)
         return
     if params.lid == "latch":
-        _add_latch_lid(params, place)
+        _add_latch_lid(params, place, report)
         return
     T = params.thickness
     fingers = params.finger_count
@@ -3077,8 +3274,19 @@ def _add_lid_panels(params: InsertParams, place) -> None:
     width_spans = _floor_joint_spans(width, T, pitch, owns_corners=False)
     wall_pitch = (params.height - T) / _odd_count(fingers)
     corner_count = _lid_corner_count(height, wall_pitch)
+    if params.lid == "cap":
+        slip = T + _CAP_SLIP
+        lid_bounds = (-slip, -slip, params.outer_length + slip, params.outer_width + slip)
+        lid_dx = lid_dy = slip
+    else:
+        lid_bounds = (0.0, 0.0, length, width)
+        lid_dx = lid_dy = 0.0
     panel = _offset_kerf(_floor_outline(length, width, T, length_spans, width_spans), kerf, outward=True)
-    place("lid-panel", panel, [], length, width, "Lid")
+    panel_holes = _apply_openings(
+        params, "lid", _hosted(params, "lid"), lid_bounds, [], lid_dx, lid_dy, report,
+        shape=panel,
+    )
+    place("lid-panel", panel, panel_holes, length, width, "Lid")
     for name, edge, left_male, right_male, spans in [
         ("lid-front", length, True, True, length_spans),
         ("lid-back", length, False, False, length_spans),
@@ -3090,7 +3298,11 @@ def _add_lid_panels(params: InsertParams, place) -> None:
             kerf,
             outward=True,
         )
-        place(name, outline, [], edge + 2.0 * T, wall_h + T, "Lid " + name.split("-", 1)[1])
+        side_holes = _apply_openings(
+            params, name, _hosted(params, name), (0.0, 0.0, edge, wall_h), [], 0.0, 0.0, report,
+            shape=outline,
+        )
+        place(name, outline, side_holes, edge + 2.0 * T, wall_h + T, "Lid " + name.split("-", 1)[1])
     if params.lid != "top" or not params.lid_tabs:
         return
     leg = params.alignment_leg()

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Box Inserts — prototype</title>
-  <link rel="stylesheet" href="/static/style.css?v=design-name" />
+  <link rel="stylesheet" href="/static/style.css?v=openings10" />
 </head>
 <body>
   <header>
@@ -262,6 +262,18 @@
       <div id="dividers"></div>
       <button type="button" id="add-divider" class="secondary">Add divider</button>
 
+      <h2 class="with-info">Openings
+        <span class="info">
+          <button type="button" class="info-btn" aria-expanded="false" aria-controls="tip-openings" aria-label="About openings">i</button>
+          <span id="tip-openings" class="tip" role="tooltip" hidden>Each opening is its own cut. On a wall, X starts at the left end and Y at the outside bottom. On a lid side, X starts at the left end and Y at the edge that joins the lid. On a divider, X starts at the first endpoint and Y runs up the face. On the lid sheet, X starts at the left outside and Y at the front, the same as the plan. A cap hangs past that corner. The cut stays one material thickness in from the edge of the piece, and clear of joints and other cuts. Width and height are the finished size. Rectangle, rounded rectangle, oval, and obround are drawn here. Upload an SVG for a shape of your own. The file needs one closed outline. After upload, move, rotate, and scale it. The padlock keeps width and height in the same proportion when you type a size or drag the handle. An open padlock lets each one change on its own. The piece below shows the selected opening on its face, with the finger joints and other cuts already on that piece. A cut that is too close to an edge, overlaps another opening, or runs into a joint is drawn in red. The checkbox on that opening generates the cut path anyway.</span>
+        </span>
+      </h2>
+      <div id="openings"></div>
+      <button type="button" id="add-opening" class="secondary">Add opening</button>
+      <canvas id="opening-piece" width="640" height="220" aria-label="Selected piece, with its openings"></canvas>
+      <p id="opening-piece-note" class="hint">Add an opening to cut a hole in a wall, a lid, or a divider.</p>
+      <input id="opening-svg" type="file" accept=".svg,image/svg+xml" hidden />
+
       <h2>Saved design</h2>
       <div class="actions">
         <button type="button" id="design-download">Download design</button>
@@ -342,6 +354,6 @@
     <p><a href="https://github.com/kevinpetursson/LaserBox">Source code</a> · <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a></p>
   </footer>
 
-  <script src="/static/app.js?v=outside-default"></script>
+  <script src="/static/app.js?v=openings10"></script>
 </body>
 </html>

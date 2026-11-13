@@ -11,10 +11,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from pydantic import BaseModel
+
 from insert_gen.kerf_test import export_kerf_dxf, export_kerf_svg
-from insert_gen.laser import build_panels, export_dxf, export_svg, panel_label
+from insert_gen.laser import OpeningReport, build_panels, export_dxf, export_svg, panel_label
 from insert_gen.mesh import build_print_parts, export_stl
 from insert_gen.model import InsertParams, demo_params
+from insert_gen.openings import parse_svg_outline
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -44,8 +47,9 @@ def _poly(points) -> list:
 @app.post("/api/preview")
 def preview(params: InsertParams) -> dict:
     """Assembled triangles for the 3D view and nested panels for the 2D drawing."""
+    report = OpeningReport()
     panels = []
-    for panel in build_panels(params):
+    for panel in build_panels(params, report):
         text, _font, anchor = panel_label(panel)
         panels.append(
             {
@@ -59,7 +63,7 @@ def preview(params: InsertParams) -> dict:
         )
     triangles = []
     parts = []
-    for name, tris in build_print_parts(params):
+    for name, tris in build_print_parts(params, report.users):
         parts.append({"name": name, "start": len(triangles), "count": len(tris)})
         for tri in tris:
             triangles.append([[_num(c) for c in vertex] for vertex in tri])
@@ -74,7 +78,24 @@ def preview(params: InsertParams) -> dict:
         "panels": panels,
         "triangles": triangles,
         "parts": parts,
+        "frames": report.frames,
+        "openings": report.notes,
     }
+
+
+class SvgBody(BaseModel):
+    svg: str
+
+
+@app.post("/api/opening-svg")
+def opening_svg(body: SvgBody) -> dict:
+    """Flatten one closed SVG shape into millimetre points around its center."""
+    if len(body.svg) > 200_000:
+        raise HTTPException(400, "That SVG is too large.")
+    try:
+        return parse_svg_outline(body.svg)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 ExportFmt = Literal["stl", "svg", "dxf"]

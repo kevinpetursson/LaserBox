@@ -195,8 +195,64 @@ def _divider_prism(d: Divider, thickness: float, z0: float, z1: float, params: I
     return _loft_quads(quad(z0), quad(z1))
 
 
-def build_print_parts(params: InsertParams) -> List[Tuple[str, List[Tri]]]:
+def _divider_open_plate(
+    d: Divider, params: InsertParams, z0: float, z1: float, holes: Sequence[Sequence[Vec2]]
+) -> List[Tri] | None:
+    """Divider plate with openings through it. None keeps the solid plate."""
+    if not holes or _end_follow(d, True, params) or _end_follow(d, False, params):
+        return None
+    plate = d.plate_span(params.height, params.thickness, params.floor, params.closed_top())
+    if plate is None:
+        return None
+    laser_y0 = plate[0]
+    dx, dy = d.x2 - d.x1, d.y2 - d.y1
+    length = float(np.hypot(dx, dy))
+    if length < 1e-6 or z1 <= z0:
+        return None
+    ux, uy = dx / length, dy / length
+    nx, ny = -uy, ux
+    half = params.thickness / 2.0
+    if d.leans():
+        alpha = d.tilt_radians()
+        cos_a = math.cos(alpha)
+        if abs(cos_a) < 0.2:
+            return None
+        sin_a = math.sin(alpha)
+        tan_a = math.tan(alpha)
+        tx, ty, tz = uy * cos_a, -ux * cos_a, sin_a
+        anchor = 0.0 if d.bottom <= 1e-6 and d.floor_fingers else z0
+        v0 = (z0 - laser_y0) / cos_a
+        v1 = (z1 - laser_y0) / cos_a
+
+        def to_world(u: float, v: float, side: int) -> Vec3:
+            face = -1.0 if side == 0 else 1.0
+            z = laser_y0 + v * cos_a
+            shift = (z - anchor) * tan_a
+            px = d.x1 + ux * u + nx * shift
+            py = d.y1 + uy * u + ny * shift
+            return (px + tx * half * face, py + ty * half * face, z + tz * half * face)
+    else:
+        v0 = z0 - laser_y0
+        v1 = z1 - laser_y0
+
+        def to_world(u: float, v: float, side: int) -> Vec3:
+            face = -1.0 if side == 0 else 1.0
+            px = d.x1 + ux * u
+            py = d.y1 + uy * u
+            return (px + nx * half * face, py + ny * half * face, laser_y0 + v)
+
+    if v1 <= v0 + 0.4:
+        return None
+    outer = [(-0.01, v0), (length + 0.01, v0), (length + 0.01, v1), (-0.01, v1)]
+    return _mapped_plate(outer, holes, to_world)
+
+
+def build_print_parts(params: InsertParams, users: dict | None = None) -> List[Tuple[str, List[Tri]]]:
     """Print solid split into the box body and one part per divider, in divider order."""
+    if users is None:
+        from .laser import accepted_opening_users
+
+        users = accepted_opening_users(params)
     body: List[Tri] = []
     if params.floor:
         body.extend(_box_tris(0, 0, 0, params.outer_length, params.outer_width, params.thickness))
@@ -211,39 +267,77 @@ def build_print_parts(params: InsertParams) -> List[Tuple[str, List[Tri]]]:
             top -= params.thickness
         return top - z0
 
-    body.extend(_box_tris(0, 0, z0, L, T, wall_dz("wall-front")))
-    body.extend(_box_tris(0, W - T, z0, L, T, wall_dz("wall-back")))
-    body.extend(_box_tris(0, T, z0, T, W - 2 * T, wall_dz("wall-left")))
-    body.extend(_box_tris(L - T, T, z0, T, W - 2 * T, wall_dz("wall-right")))
+    def add_wall(name: str, box, outer, to_world) -> None:
+        body.extend(_face_or_box(users.get(name) or [], outer, to_world, box))
+
+    front_top = z0 + wall_dz("wall-front")
+    add_wall(
+        "wall-front",
+        (0, 0, z0, L, T, wall_dz("wall-front")),
+        [(0, z0), (L, z0), (L, front_top), (0, front_top)],
+        lambda u, v, side, thickness=T: (u, 0.0 if side == 0 else thickness, v),
+    )
+    back_top = z0 + wall_dz("wall-back")
+    add_wall(
+        "wall-back",
+        (0, W - T, z0, L, T, wall_dz("wall-back")),
+        [(0, z0), (L, z0), (L, back_top), (0, back_top)],
+        lambda u, v, side, width=W, thickness=T: (u, width if side == 0 else width - thickness, v),
+    )
+    left_top = z0 + wall_dz("wall-left")
+    add_wall(
+        "wall-left",
+        (0, T, z0, T, W - 2 * T, wall_dz("wall-left")),
+        [(T, z0), (W - T, z0), (W - T, left_top), (T, left_top)],
+        lambda u, v, side, thickness=T: (0.0 if side == 0 else thickness, u, v),
+    )
+    right_top = z0 + wall_dz("wall-right")
+    add_wall(
+        "wall-right",
+        (L - T, T, z0, T, W - 2 * T, wall_dz("wall-right")),
+        [(T, z0), (W - T, z0), (W - T, right_top), (T, right_top)],
+        lambda u, v, side, length=L, thickness=T: (length if side == 0 else length - thickness, u, v),
+    )
     parts: List[Tuple[str, List[Tri]]] = [("body", body)]
-    lid = _lid_tris(params)
+    lid = _lid_tris(params, users)
     if lid:
         parts.append(("lid", lid))
     for i, d in enumerate(params.dividers):
         span = d.print_span(params.height, params.thickness, params.floor, params.closed_top())
-        prism = (
+        holes = users.get(f"divider-{i}") or []
+        cut = _divider_open_plate(d, params, span[0], span[1], holes) if span is not None and holes else None
+        prism = cut if cut else (
             _divider_prism(d, params.thickness, span[0], span[1], params) if span is not None else []
         )
         parts.append((f"divider-{i}", prism))
     return parts
 
 
-def _lid_tris(params: InsertParams) -> List[Tri]:
+def _lid_tris(params: InsertParams, users: dict | None = None) -> List[Tri]:
     """Solid lid, without finger cutouts. A cap hangs over the outside.
 
     A sit-on-top lid matches the box footprint. Its rim hangs down onto the
     walls, so the opening faces the box and the panel closes the top.
     Alignment tabs run through that lid space and on down into the box.
     """
+    users = users or {}
     if params.lid == "none":
         return []
     if params.closed_top():
         z = params.height - params.thickness
-        return _box_tris(0.0, 0.0, z, params.outer_length, params.outer_width, params.thickness)
+        length, width, thickness = params.outer_length, params.outer_width, params.thickness
+        outer = [(0.0, 0.0), (length, 0.0), (length, width), (0.0, width)]
+
+        def to_world(u: float, v: float, side: int, base: float = z, thick: float = thickness) -> Vec3:
+            return (u, v, base if side == 0 else base + thick)
+
+        return _face_or_box(
+            users.get("lid") or [], outer, to_world, (0.0, 0.0, z, length, width, thickness)
+        )
     if params.lid == "slide":
-        return _slide_lid_tris(params)
+        return _slide_lid_tris(params, users)
     if params.lid == "latch":
-        return _latch_lid_tris(params)
+        return _latch_lid_tris(params, users)
     T = params.thickness
     lip = params.lid_height
     box_h = params.height
@@ -264,12 +358,54 @@ def _lid_tris(params: InsertParams) -> List[Tri]:
         # Rim hangs down to the wall tops. The opening faces the box.
         wall_z = seat
         panel_z = seat + lip
+    rim_h = lip + T
     tris: List[Tri] = []
-    tris.extend(_box_tris(ox, oy, panel_z, length, width, T))
-    tris.extend(_box_tris(ox, oy, wall_z, length, T, lip))
-    tris.extend(_box_tris(ox, oy + width - T, wall_z, length, T, lip))
-    tris.extend(_box_tris(ox, oy + T, wall_z, T, width - 2.0 * T, lip))
-    tris.extend(_box_tris(ox + length - T, oy + T, wall_z, T, width - 2.0 * T, lip))
+
+    def panel_world(u: float, v: float, side: int, base: float = panel_z, thick: float = T) -> Vec3:
+        return (u, v, base if side == 0 else base + thick)
+
+    tris.extend(
+        _face_or_box(
+            users.get("lid") or [],
+            [(ox, oy), (ox + length, oy), (ox + length, oy + width), (ox, oy + width)],
+            panel_world,
+            (ox, oy, panel_z, length, width, T),
+        )
+    )
+    side_outer = [(0.0, T), (length, T), (length, rim_h), (0.0, rim_h)]
+    end_outer = [(T, T), (width - T, T), (width - T, rim_h), (T, rim_h)]
+
+    def front_world(u: float, v: float, side: int) -> Vec3:
+        return (ox + u, oy if side == 0 else oy + T, wall_z + rim_h - v)
+
+    def back_world(u: float, v: float, side: int) -> Vec3:
+        return (ox + u, oy + width if side == 0 else oy + width - T, wall_z + rim_h - v)
+
+    def left_world(u: float, v: float, side: int) -> Vec3:
+        return (ox if side == 0 else ox + T, oy + u, wall_z + rim_h - v)
+
+    def right_world(u: float, v: float, side: int) -> Vec3:
+        return (ox + length if side == 0 else ox + length - T, oy + u, wall_z + rim_h - v)
+
+    tris.extend(_face_or_box(users.get("lid-front") or [], side_outer, front_world, (ox, oy, wall_z, length, T, lip)))
+    tris.extend(
+        _face_or_box(
+            users.get("lid-back") or [], side_outer, back_world, (ox, oy + width - T, wall_z, length, T, lip)
+        )
+    )
+    tris.extend(
+        _face_or_box(
+            users.get("lid-left") or [], end_outer, left_world, (ox, oy + T, wall_z, T, width - 2.0 * T, lip)
+        )
+    )
+    tris.extend(
+        _face_or_box(
+            users.get("lid-right") or [],
+            end_outer,
+            right_world,
+            (ox + length - T, oy + T, wall_z, T, width - 2.0 * T, lip),
+        )
+    )
     if params.lid == "top" and params.lid_tabs:
         tris.extend(_lid_tab_tris(params))
     return tris
@@ -325,7 +461,8 @@ def _ear_clip(poly: Sequence[Vec2]) -> List[Tuple[Vec2, Vec2, Vec2]] | None:
 
     tris: List[Tuple[Vec2, Vec2, Vec2]] = []
     guard = 0
-    while len(pts) > 3 and guard < 500:
+    limit = max(800, len(pts) * len(pts))
+    while len(pts) > 3 and guard < limit:
         guard += 1
         n = len(pts)
         clipped = False
@@ -425,7 +562,144 @@ def _plate_with_hole(outer: Sequence[Vec2], hole: Sequence[Vec2], z0: float, z1:
     return tris
 
 
-def _slide_lid_tris(params: InsertParams) -> List[Tri]:
+def _point_in_poly(x: float, y: float, poly: Sequence[Vec2]) -> bool:
+    inside = False
+    count = len(poly)
+    for i in range(count):
+        x0, y0 = poly[i]
+        x1, y1 = poly[(i + 1) % count]
+        if (y0 > y) != (y1 > y):
+            cross = (x1 - x0) * (y - y0) / (y1 - y0) + x0
+            if x < cross:
+                inside = not inside
+    return inside
+
+
+def _segments_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool:
+    def cross(p: Vec2, q: Vec2, r: Vec2) -> float:
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    d1, d2 = cross(a, b, c), cross(a, b, d)
+    d3, d4 = cross(c, d, a), cross(c, d, b)
+    if abs(d1) < 1e-8 or abs(d2) < 1e-8 or abs(d3) < 1e-8 or abs(d4) < 1e-8:
+        return False
+    return (d1 > 0) != (d2 > 0) and (d3 > 0) != (d4 > 0)
+
+
+def _shares_end(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool:
+    def same(p: Vec2, q: Vec2) -> bool:
+        return abs(p[0] - q[0]) < 1e-7 and abs(p[1] - q[1]) < 1e-7
+
+    return same(a, c) or same(a, d) or same(b, c) or same(b, d)
+
+
+def _segment_clear(poly: Sequence[Vec2], a: Vec2, b: Vec2) -> bool:
+    mid = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+    if not _point_in_poly(mid[0], mid[1], poly):
+        return False
+    count = len(poly)
+    for i in range(count):
+        c, d = poly[i], poly[(i + 1) % count]
+        if _shares_end(a, b, c, d):
+            continue
+        if _segments_cross(a, b, c, d):
+            return False
+    return True
+
+
+def _bridge_holes(outer: Sequence[Vec2], holes: Sequence[Sequence[Vec2]]) -> List[Vec2] | None:
+    """One simple polygon. Each hole is joined to the outline by a zero-width bridge."""
+    current = _ccw(outer)
+    ordered = sorted(holes, key=lambda hole: -max(point[0] for point in hole))
+    for hole in ordered:
+        ring = _ccw(hole)
+        ring.reverse()
+        hi = max(range(len(ring)), key=lambda i: (ring[i][0], ring[i][1]))
+        hx, hy = ring[hi]
+        best_i = None
+        best_d = None
+        for i, (x, y) in enumerate(current):
+            if x < hx - 1e-6:
+                continue
+            if abs(x - hx) < 1e-7 and abs(y - hy) < 1e-7:
+                continue
+            if not _segment_clear(current, (hx, hy), (x, y)):
+                continue
+            dist = (x - hx) ** 2 + (y - hy) ** 2
+            if best_d is None or dist < best_d:
+                best_d = dist
+                best_i = i
+        if best_i is None:
+            return None
+        merged: List[Vec2] = list(current[: best_i + 1])
+        for step in range(len(ring) + 1):
+            merged.append(ring[(hi + step) % len(ring)])
+        merged.append(current[best_i])
+        merged.extend(current[best_i + 1 :])
+        current = merged
+    return current
+
+
+def _hole_inside(hole: Sequence[Vec2], outer: Sequence[Vec2], pad: float) -> bool:
+    xs = [point[0] for point in outer]
+    ys = [point[1] for point in outer]
+    x0, x1 = min(xs) + pad, max(xs) - pad
+    y0, y1 = min(ys) + pad, max(ys) - pad
+    if x1 <= x0 or y1 <= y0:
+        return False
+    return all(x0 <= x <= x1 and y0 <= y <= y1 for x, y in hole)
+
+
+def _mapped_loop(poly: Sequence[Vec2], to_world) -> List[Tri]:
+    pts = list(poly)
+    count = len(pts)
+    tris: List[Tri] = []
+    for i in range(count):
+        j = (i + 1) % count
+        a = to_world(pts[i][0], pts[i][1], 0)
+        b = to_world(pts[j][0], pts[j][1], 0)
+        c = to_world(pts[j][0], pts[j][1], 1)
+        d = to_world(pts[i][0], pts[i][1], 1)
+        tris.append((a, b, c))
+        tris.append((a, c, d))
+    return tris
+
+
+def _mapped_plate(outer: Sequence[Vec2], holes: Sequence[Sequence[Vec2]], to_world) -> List[Tri] | None:
+    """A plate with holes. `to_world(u, v, side)` maps the flat face; side is 0 or 1.
+
+    Returns None when the holes will not triangulate. The caller keeps the solid plate.
+    """
+    usable = [list(hole) for hole in holes if len(hole) >= 3 and _hole_inside(hole, outer, 0.05)]
+    if not usable:
+        return None
+    bridged = _bridge_holes(outer, usable)
+    if bridged is None:
+        return None
+    faces = _ear_clip(bridged)
+    if not faces:
+        return None
+    tris: List[Tri] = []
+    for a, b, c in faces:
+        if abs(_cross2(a, b, c)) < 1e-8:
+            continue
+        tris.append((to_world(a[0], a[1], 1), to_world(b[0], b[1], 1), to_world(c[0], c[1], 1)))
+        tris.append((to_world(a[0], a[1], 0), to_world(c[0], c[1], 0), to_world(b[0], b[1], 0)))
+    tris.extend(_mapped_loop(_ccw(outer), to_world))
+    for hole in usable:
+        tris.extend(_mapped_loop(list(reversed(_ccw(hole))), to_world))
+    return tris
+
+
+def _face_or_box(holes, outer, to_world, box) -> List[Tri]:
+    plate = _mapped_plate(outer, holes, to_world) if holes else None
+    if plate:
+        return plate
+    x0, y0, z0, dx, dy, dz = box
+    return _box_tris(x0, y0, z0, dx, dy, dz)
+
+
+def _slide_lid_tris(params: InsertParams, users: dict | None = None) -> List[Tri]:
     """The sheet in its closed position, with the side tabs in the walls.
 
     It sits on the entry wall. The slotted walls and the stop wall stand two
@@ -447,14 +721,27 @@ def _slide_lid_tris(params: InsertParams) -> List[Tri]:
         tris.extend(_box_tris(x0, y0, z, x1 - x0, y1 - y0, thickness))
 
     hole = params.slide_finger_hole()
+    extras = list((users or {}).get("lid") or [])
+    holes = ([hole] if hole else []) + extras
     outer = [
         params.slide_point(0.0, a0),
         params.slide_point(0.0, a1),
         params.slide_point(span, a1),
         params.slide_point(span, a0),
     ]
-    if hole:
-        tris.extend(_plate_with_hole(outer, hole, z, z + thickness))
+
+    def to_world(u: float, v: float, side: int, base: float = z, thick: float = thickness) -> Vec3:
+        return (u, v, base if side == 0 else base + thick)
+
+    plate = _mapped_plate(outer, holes, to_world) if holes else None
+    if plate:
+        tris.extend(plate)
+    elif hole:
+        cut = _plate_with_hole(outer, hole, z, z + thickness)
+        if cut:
+            tris.extend(cut)
+        else:
+            add_span(0.0, span, a0, a1)
     else:
         add_span(0.0, span, a0, a1)
     for start, end in params.slide_tabs():
@@ -476,7 +763,7 @@ def _latch_box(params: InsertParams, across0: float, inward0: float, across1: fl
     return x0, y0, x1 - x0, y1 - y0
 
 
-def _latch_lid_tris(params: InsertParams) -> List[Tri]:
+def _latch_lid_tris(params: InsertParams, users: dict | None = None) -> List[Tri]:
     """The lid sheet, with the spring tabs in the chosen wall and a finger hole in each.
 
     The serpentine that lets those tabs pull inward is cut only in the laser file.
@@ -501,6 +788,28 @@ def _latch_lid_tris(params: InsertParams) -> List[Tri]:
         tris.extend(_box_tris(x, y, z, dx, dy, thickness))
 
     holes = params.latch_finger_holes()
+    extras = list((users or {}).get("lid") or [])
+    if extras:
+        outer = [
+            params.latch_point(thickness, thickness),
+            params.latch_point(across - thickness, thickness),
+            params.latch_point(across - thickness, along - thickness),
+            params.latch_point(thickness, along - thickness),
+        ]
+
+        def to_world(u: float, v: float, side: int, base: float = z, thick: float = thickness) -> Vec3:
+            return (u, v, base if side == 0 else base + thick)
+
+        plate = _mapped_plate(outer, list(holes) + extras, to_world)
+        if plate:
+            tris.extend(plate)
+            for left, right in params.latch_tab_spans():
+                x, y, dx, dy = _latch_box(params, left, 0.0, right, thickness)
+                tris.extend(_box_tris(x, y, z, dx, dy, thickness))
+            for left, right in params.latch_back_tabs():
+                x, y, dx, dy = _latch_box(params, left, along - thickness, right, along)
+                tris.extend(_box_tris(x, y, z, dx, dy, thickness))
+            return tris
     centers = params.latch_centers()
     if len(holes) == 1:
         plate(thickness, across - thickness, holes[0])
